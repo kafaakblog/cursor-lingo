@@ -44,4 +44,189 @@ static const char kEnBase[] = "`1234567890-=qwertyuiop[]\\asdfghjkl;'zxcvbnm,./"
 static const char kEnShift[] = "~!@#$%^&*()_+QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>?";
 // Thai Kedmanee, written as escapes so that no compiler can misread the source encoding
 // (MSVC without /utf-8 reads source files in the ANSI code page).
-static const char16_t kThBase[] = u"_+๑๒๓๔ู฿๕๖๗๘๙๐-=๐";
+// Base:  _ๅ/-ภถุึคตจขช ๆไำพะัีรนยบลฃ ฟหกดเ้่าสวง ผปแอิืทมใฝ
+// Shift: %+๑๒๓๔ู฿๕๖๗๘๙ ๐"ฎฑธํ๊ณฯญฐ,ฅ ฤฆฏโฌ็๋ษศซ. ()ฉฮฺ์?ฒฬฦ
+static const char16_t kThBase[] = u"_\u0E45/-\u0E20\u0E16\u0E38\u0E36\u0E04\u0E15\u0E08\u0E02\u0E0A\u0E46\u0E44\u0E33\u0E1E\u0E30\u0E31\u0E35\u0E23\u0E19\u0E22\u0E1A\u0E25\u0E03\u0E1F\u0E2B\u0E01\u0E14\u0E40\u0E49\u0E48\u0E32\u0E2A\u0E27\u0E07\u0E1C\u0E1B\u0E41\u0E2D\u0E34\u0E37\u0E17\u0E21\u0E43\u0E1D";
+static const char16_t kThShift[] = u"%+\u0E51\u0E52\u0E53\u0E54\u0E39\u0E3F\u0E55\u0E56\u0E57\u0E58\u0E59\u0E50\"\u0E0E\u0E11\u0E18\u0E4D\u0E4A\u0E13\u0E2F\u0E0D\u0E10,\u0E05\u0E24\u0E06\u0E0F\u0E42\u0E0C\u0E47\u0E4B\u0E29\u0E28\u0E0B.()\u0E09\u0E2E\u0E3A\u0E4C?\u0E12\u0E2C\u0E26";
+// One character per key in every table: a misread source encoding fails the build instead of the user.
+static_assert(sizeof(kEnBase) == kKeyCount + 1 && sizeof(kEnShift) == kKeyCount + 1, "English table size");
+static_assert(sizeof(kThBase) / sizeof(char16_t) == kKeyCount + 1, "Thai table size");
+static_assert(sizeof(kThShift) / sizeof(char16_t) == kKeyCount + 1, "Thai shift table size");
+
+// Platform key codes for the same 47 physical keys, in the same order.
+static const uint8_t kMacKeycode[kKeyCount] = {
+    50, 18, 19, 20, 21, 23, 22, 26, 28, 25, 29, 27, 24,
+    12, 13, 14, 15, 17, 16, 32, 34, 31, 35, 33, 30, 42,
+    0, 1, 2, 3, 5, 4, 38, 40, 37, 41, 39,
+    6, 7, 8, 9, 11, 45, 46, 43, 47, 44};
+static const uint8_t kWinScan[kKeyCount] = {
+    0x29, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x2B,
+    0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+    0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35};
+
+inline int keyIndexFrom(const uint8_t* table, int code) {
+    for (int i = 0; i < kKeyCount; i++) if (table[i] == code) return i;
+    return -1;
+}
+
+inline char16_t charFor(uint8_t key, Lang lang) {
+    int i = key & 0x7F;
+    if (i >= kKeyCount) return 0;
+    bool s = key & kShiftBit;
+    if (lang == LANG_EN) return (char16_t)(s ? kEnShift[i] : kEnBase[i]);
+    return s ? kThShift[i] : kThBase[i];
+}
+
+inline int render(const uint8_t* keys, int n, Lang lang, char16_t* out) {
+    for (int i = 0; i < n; i++) out[i] = charFor(keys[i], lang);
+    out[n] = 0;
+    return n;
+}
+
+inline int keyFor(char16_t c, Lang lang) {
+    if (c == 0) return -1;
+    for (int i = 0; i < kKeyCount; i++) {
+        if (charFor((uint8_t)i, lang) == c) return i;
+        if (charFor((uint8_t)(i | kShiftBit), lang) == c) return i | kShiftBit;
+    }
+    return -1;
+}
+
+// Re-reads arbitrary text through the other keyboard layout; direction follows the dominant script.
+inline int convertText(const char16_t* in, int n, char16_t* out) {
+    int thai = 0, latin = 0;
+    for (int i = 0; i < n; i++) {
+        if (in[i] >= 0x0E01 && in[i] <= 0x0E5B) thai++;
+        else if ((in[i] >= 'a' && in[i] <= 'z') || (in[i] >= 'A' && in[i] <= 'Z')) latin++;
+    }
+    if (thai == 0 && latin == 0) return -1;
+    const Lang from = thai > latin ? LANG_TH : LANG_EN, to = from == LANG_TH ? LANG_EN : LANG_TH;
+    bool changed = false;
+    for (int i = 0; i < n; i++) {
+        int k = keyFor(in[i], from);
+        out[i] = k < 0 ? in[i] : charFor((uint8_t)k, to);
+        changed |= out[i] != in[i];
+    }
+    return changed ? (int)to : -1;
+}
+
+// Toggle ASCII digits and Thai digits in UTF-8, preserving all other bytes.
+inline std::string toggleDigits(const std::string& input) {
+    std::string out;
+    out.reserve(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(input[i]);
+        if (c >= '0' && c <= '9') {
+            out.push_back(static_cast<char>(0xE0));
+            out.push_back(static_cast<char>(0xB9));
+            out.push_back(static_cast<char>(0x90 + (c - '0')));
+        } else if (c == 0xE0 && i + 2 < input.size() &&
+                   static_cast<unsigned char>(input[i + 1]) == 0xB9 &&
+                   static_cast<unsigned char>(input[i + 2]) >= 0x90 &&
+                   static_cast<unsigned char>(input[i + 2]) <= 0x99) {
+            out.push_back(static_cast<char>('0' + static_cast<unsigned char>(input[i + 2]) - 0x90));
+            i += 2;
+        } else {
+            out.push_back(input[i]);
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// English
+// ---------------------------------------------------------------------------------------------
+
+inline bool isTrailingPunct(char16_t c) {
+    return c == '.' || c == ',' || c == ';' || c == ':' || c == '!' || c == '?' || c == '\'' || c == '"' || c == ')';
+}
+
+inline float englishCost(const char16_t* s, int n, bool complete = true) {
+    while (n > 0 && isTrailingPunct(s[n - 1])) n--;
+    if (n == 0) return 99.0f;
+    if (n >= 3 && s[n - 2] == '\'') {
+        char16_t c = s[n - 1] | 0x20;
+        if (c == 's' || c == 't' || c == 'd' || c == 'm') n -= 2;
+    } else if (n >= 4 && s[n - 3] == '\'') {
+        char16_t c1 = s[n - 2] | 0x20, c2 = s[n - 1] | 0x20;
+        if ((c1 == 'l' && c2 == 'l') || (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e')) n -= 3;
+    }
+    int a = 0, b = 0, cost = 0;
+    const int last = complete ? n : n - 1;
+    for (int i = 0; i <= last; i++) {
+        int c = 0;
+        if (i < n) {
+            char16_t ch = s[i];
+            if (ch >= 'A' && ch <= 'Z') ch = (char16_t)(ch + 32);
+            if (ch >= 'a' && ch <= 'z') c = ch - 'a' + 1;
+            else cost += 16 * 6;
+        }
+        cost += kEnCost[(a * 27 + b) * 27 + c]; a = b; b = c;
+        if (i < n && c == 0) { a = 0; b = 0; }
+    }
+    return cost / 16.0f / (float)(last + 1);
+}
+inline bool thCons(char16_t c) { return c >= 0x0E01 && c <= 0x0E2E; }
+inline bool thLead(char16_t c) { return c >= 0x0E40 && c <= 0x0E44; }
+inline bool thUpper(char16_t c) { return c == 0x0E31 || (c >= 0x0E34 && c <= 0x0E37); }
+inline bool thLower(char16_t c) { return c == 0x0E38 || c == 0x0E39; }
+inline bool thTone(char16_t c) { return c >= 0x0E48 && c <= 0x0E4B; }
+inline bool thFollow(char16_t c) { return c == 0x0E30 || c == 0x0E32 || c == 0x0E33; }
+struct ThaiParse { bool ok; int syllables; int bare; };
+inline bool thSecondOfCluster(char16_t a, char16_t b) {
+    if (b == 0x0E23 || b == 0x0E25 || b == 0x0E27) return a != 0x0E23 && a != 0x0E25 && a != 0x0E27;
+    if (a == 0x0E2B) return b == 0x0E07 || b == 0x0E0D || b == 0x0E19 || b == 0x0E21 || b == 0x0E22;
+    if (a == 0x0E2D) return b == 0x0E22;
+    return false;
+}
+inline bool thFinalOk(char16_t c) { return thCons(c) && c != 0x0E1C && c != 0x0E1D && c != 0x0E2B && c != 0x0E2E && c != 0x0E03 && c != 0x0E05 && c != 0x0E09 && c != 0x0E0C; }
+inline ThaiParse parseThai(const char16_t* s, int n) {
+    constexpr int INF = 1 << 20;
+    if (n == 0 || n > kMaxWord) return {false, 0, 0};
+    int best[kMaxWord + 1], cnt[kMaxWord + 1];
+    for (int i = 0; i <= n; i++) best[i] = INF, cnt[i] = 0;
+    best[0] = 0;
+    for (int i = 0; i < n; i++) {
+        if (best[i] >= INF) continue;
+        char16_t c0 = s[i];
+        if ((c0 == 0x0E46 || c0 == 0x0E2F) && i > 0) { if (best[i] < best[i + 1]) { best[i + 1] = best[i]; cnt[i + 1] = cnt[i]; } continue; }
+        int p = i; char16_t lead = 0;
+        if (thLead(s[p])) lead = s[p++];
+        if (p >= n || !thCons(s[p])) continue;
+        char16_t init = s[p++];
+        for (int cl = 0; cl < 2; cl++) {
+            int q = p;
+            if (cl) { if (q >= n || !thSecondOfCluster(init, s[q])) continue; q++; }
+            int nuc = 0, r = q;
+            if (r < n && thUpper(s[r])) { nuc = 1; r++; } else if (r < n && thLower(s[r])) { nuc = 2; r++; } else if (r < n && s[r] == 0x0E47) { nuc = 3; r++; } else if (!lead && r + 1 < n && s[r] == 0x0E23 && s[r+1] == 0x0E23) { nuc = 4; r += 2; }
+            bool tone = false; if (r < n && thTone(s[r])) { tone = true; r++; }
+            int follow = 0;
+            if (r < n && thFollow(s[r])) { follow = s[r] == 0x0E30 ? 1 : s[r] == 0x0E32 ? 2 : 3; r++; if (follow == 2 && lead == 0x0E40 && r < n && s[r] == 0x0E30) { follow = 4; r++; } }
+            int carrier = 0;
+            if (!follow && r < n) { if (s[r] == 0x0E2D && !nuc && (!lead || lead == 0x0E40)) { carrier = 1; r++; } else if (lead == 0x0E40 && nuc == 1 && ((s[q] == 0x0E35 && s[r] == 0x0E22) || (s[q] == 0x0E37 && s[r] == 0x0E2D))) { carrier = 1; r++; } else if (!lead && !nuc && s[r] == 0x0E27 && r + 1 < n && thFinalOk(s[r+1])) { carrier = 2; r++; } }
+            if (nuc && follow) continue;
+            if (lead == 0x0E44 || lead == 0x0E43) { if (nuc || follow) continue; } else if (lead == 0x0E42) { if (nuc || (follow && follow != 1)) continue; } else if (lead == 0x0E41) { if ((nuc && nuc != 3) || (follow && follow != 1)) continue; } else if (lead == 0x0E40) { if (nuc == 2 || follow == 3) continue; }
+            for (int f = 0; f < 3; f++) { int e = r; if (f >= 1) { if (e >= n || !thFinalOk(s[e]) || follow == 1 || follow == 3 || follow == 4) continue; e++; } if (f == 2) { if (e >= n || !thCons(s[e])) continue; e++; } if (e < n && s[e] == 0x0E4C) e++; else if (f == 2) continue; if (e < n && (thUpper(s[e]) || thLower(s[e]) || thTone(s[e]) || thFollow(s[e]))) continue; if (carrier == 2 && f == 0) continue; bool ev = lead || nuc || follow || carrier; if (!ev && tone && f == 0) continue; if (nuc == 1 && s[q] == 0x0E31 && f == 0) continue; int weight = ev ? 0 : (f == 0 && !tone ? 2 : 1); int bare = best[i] + weight; if (bare < best[e]) { best[e] = bare; cnt[e] = cnt[i] + 1; } }
+        }
+    }
+    if (best[n] >= INF) return {false, 0, 0}; return {true, cnt[n], best[n]};
+}
+inline bool isLatin(char16_t c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+inline bool looksLikeCode(const uint8_t* keys, int n) {
+    int digits = 0, letters = 0; char16_t e[kMaxWord + 1]; render(keys, n, LANG_EN, e);
+    for (int i = 0; i < n; i++) { if (e[i] >= '0' && e[i] <= '9') digits++; if (isLatin(e[i])) letters++; switch (e[i]) { case '\\': case '@': case '#': case '_': case '~': case '|': case '+': case '*': case '<': case '>': case '{': case '}': case '%': case '&': case '$': if (i != n-1) return true; break; case '/': if (i > 0 && i < n-1) return true; break; case '.': if (i >= 2 && n-i-1 >= 2 && n-i-1 <= 5) { bool tail = true; for (int j=i+1;j<n;j++) if (!(e[j]>='a'&&e[j]<='z')) tail=false; if (tail) return true; } break; } }
+    return letters == 0 || digits == n;
+}
+inline bool thaiLooksReal(const ThaiParse& t, int q) { return t.ok && t.bare * 4 <= t.syllables * q; }
+struct Tuning { float enGibberish=3.3f; float enGood=2.45f; int minKeys=3; int midWordMinKeys=6; int bareLenient=3; float enGoodHard=3.3f; };
+static const Tuning kTune = {};
+inline bool shouldConvert(const uint8_t* keys, int n, Lang onScreen, bool finished) {
+    const Tuning& t=kTune; if (n>kMaxWord) return false;
+    if (n<t.minKeys) { if(n!=2||onScreen!=LANG_EN||!finished)return false; char16_t en2[3],th2[3];render(keys,n,LANG_EN,en2);render(keys,n,LANG_TH,th2);int odd=0;for(int i=0;i<2;i++){char16_t c=en2[i];if(c==','||c==';'||c=='\\''||c=='['||c==']')odd++;else if(!isLatin(c))return false;}if(odd==0||(isLatin(en2[0])&&isTrailingPunct(en2[1])))return false;ThaiParse tp=parseThai(th2,n);return tp.ok&&tp.bare==0; }
+    if (!finished && (n<t.midWordMinKeys || onScreen!=LANG_EN)) return false; if(looksLikeCode(keys,n))return false;
+    char16_t en[kMaxWord+1],th[kMaxWord+1];render(keys,n,LANG_EN,en);render(keys,n,LANG_TH,th);int thn=n;if(!finished)while(thn>0&&thLead(th[thn-1]))thn--;if(thn==0)return false;int stem=n;while(stem>0&&isTrailingPunct(en[stem-1]))stem--;if(stem<t.minKeys&&stem<n)stem=n;
+    if(onScreen==LANG_EN){float ec=englishCost(en,n,finished);ThaiParse tp=parseThai(th,thn);if(!tp.ok)return false;float need;if(tp.bare*4<=tp.syllables)need=t.enGibberish;else if(tp.bare*2<=tp.syllables)need=t.enGibberish+0.8f;else if(tp.bare*4<=tp.syllables*3)need=t.enGibberish+1.6f;else return false;return ec>=need;}
+    ThaiParse tp=parseThai(th,thn);if(thaiLooksReal(tp,t.bareLenient))return false;if(englishCost(en,n)>(tp.ok?t.enGood:t.enGoodHard))return false;for(int i=0;i<stem;i++){char16_t c=en[i];if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='\\''))return false;}return true;
+}
+}  // namespace lf
