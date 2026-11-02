@@ -26,6 +26,7 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 namespace lf {
 
@@ -114,6 +115,29 @@ inline int convertText(const char16_t* in, int n, char16_t* out) {
         changed |= out[i] != in[i];
     }
     return changed ? (int)to : -1;
+}
+
+// Toggles ASCII digits and Thai digits in a UTF-8 string. Unrecognized bytes are preserved.
+inline std::string toggleDigits(const std::string& input) {
+    std::string out;
+    out.reserve(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(input[i]);
+        if (c >= '0' && c <= '9') {
+            out.push_back(static_cast<char>(0xE0));
+            out.push_back(static_cast<char>(0xB9));
+            out.push_back(static_cast<char>(0x90 + (c - '0')));
+        } else if (c == 0xE0 && i + 2 < input.size() &&
+                   static_cast<unsigned char>(input[i + 1]) == 0xB9 &&
+                   static_cast<unsigned char>(input[i + 2]) >= 0x90 &&
+                   static_cast<unsigned char>(input[i + 2]) <= 0x99) {
+            out.push_back(static_cast<char>('0' + static_cast<unsigned char>(input[i + 2]) - 0x90));
+            i += 2;
+        } else {
+            out.push_back(input[i]);
+        }
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------------------------
