@@ -1572,6 +1572,11 @@ static void BeginSelectionCopy(bool numerals = false) {
     if (!g_clip.saved) return;
     g_clip.numerals = numerals;
     g_clip.target = GetForegroundWindow();
+    // A few editors do not republish an identical selection. Clear only after saving
+    // every format, so a successful copy is observable even when it matches the old text.
+    if (!OpenClipboardRetry()) { FreeSavedClipboard(); return; }
+    if (!EmptyClipboard()) { CloseClipboard(); FreeSavedClipboard(); return; }
+    CloseClipboard();
     g_clip.seq = GetClipboardSequenceNumber();
     g_clip.tries = 0;
     SendChord('C');
@@ -1606,7 +1611,7 @@ static void CheckSelectionCopy() {
     if (GetClipboardSequenceNumber() == g_clip.seq) {
         if (++g_clip.tries < 8) return;
         KillTimer(g_host, TIMER_COPY);
-        FreeSavedClipboard();  // nothing selected: the clipboard was never touched
+        RestoreClipboard();  // nothing selected: restore the snapshot after clearing the clipboard
         return;
     }
     KillTimer(g_host, TIMER_COPY);
