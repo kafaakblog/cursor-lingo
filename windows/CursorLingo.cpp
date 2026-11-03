@@ -1624,6 +1624,8 @@ static void CheckSelectionCopy() {
             }
         }
         CloseClipboard();
+        // Reading delayed-rendered text may publish formats and advance the sequence.
+        g_clip.seq = GetClipboardSequenceNumber();
     }
     // Too long, or an editor that copies the whole line ("...\r\n") when nothing is selected: leave it.
     int target = (n == 0 || n > 2000 || in[n - 1] == u'\n') ? -1 :
