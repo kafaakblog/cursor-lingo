@@ -1,0 +1,99 @@
+--- a/macos/CursorLingo.swift
++++ b/macos/CursorLingo.swift
+@@ -81,6 +81,11 @@
+         get { d.bool(forKey: "autoFix") }
+         set { d.set(newValue, forKey: "autoFix") }
+     }
++    /// Toggle ASCII digits and Thai digits in selected text. Enabled by default.
++    static var enableThaiDigitConversion: Bool {
++        get { d.object(forKey: "enableThaiDigitConversion") as? Bool ?? true }
++        set { d.set(newValue, forKey: "enableThaiDigitConversion") }
++    }
+     /// With Auto-fix on: fix words by themselves (true), or only when double Shift asks for it (false).
+@@ -623,6 +628,45 @@
+         return .text(text)
+     }
+ 
++    /// Converts the selected digit set as a group, preserving all other selected characters.
++    func convertDigitsInSelection() {
++        guard Settings.enableThaiDigitConversion else { return }
++        switch AutoFix.accessibilitySelection() {
++        case .text(let text): replaceDigits(text)
++        case .none: return
++        case .unknown:
++            withClipboardSaved { restore in
++                let pb = NSPasteboard.general
++                let before = pb.changeCount
++                self.post(keyCode: 8, flags: .maskCommand)
++                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
++                    let text = pb.changeCount != before ? pb.string(forType: .string) : nil
++                    restore()
++                    if let text, !text.isEmpty, !text.hasSuffix("\n") { self.replaceDigits(text) }
++                }
++            }
++        }
++    }
++
++    private func replaceDigits(_ text: String) {
++        guard !text.isEmpty, text.utf8.count <= 2000 else { return }
++        let toArabic = text.unicodeScalars.contains { (0x0E50...0x0E59).contains($0.value) }
++        let converted = String(String.UnicodeScalarView(text.unicodeScalars.map { scalar in
++            let value = scalar.value
++            if toArabic, (0x0E50...0x0E59).contains(value) { return Unicode.Scalar(value - 0x0E50 + 0x30)! }
++            if !toArabic, (0x30...0x39).contains(value) { return Unicode.Scalar(value + 0x0E50 - 0x30)! }
++            return scalar
++        }))
++        guard converted != text else { return }
++        withClipboardSaved { restore in
++            let pb = NSPasteboard.general
++            pb.clearContents()
++            pb.setString(converted, forType: .string)
++            self.post(keyCode: 9, flags: .maskCommand)
++            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { restore() }
++        }
++    }
++
+     private func convertSelection() {
+@@ -1681,6 +1725,10 @@
+             item.spacing = 2
+             views.append(item)
+         }
++        views.append(separator())
++        views.append(optionRow(tr("Enable Thai Digit Conversion (0-9 ↔ ๐-๙)", "เปิดใช้งานการแปลงเลขไทย ↔ อารบิก (0-9 ↔ ๐-๙)"),
++                               tr("Select text and use ⌃⌥R to convert digits.", "เลือกข้อความแล้วกด ⌃⌥R เพื่อแปลงตัวเลข"),
++                               toggle(Settings.enableThaiDigitConversion, #selector(digitConversionChanged(_:)))))
+         if mode != .off {
+@@ -1907,6 +1955,11 @@
+         if (sender.state == .on) != app?.presenter.drawing { app?.toggleDrawing() }
+     }
+ 
++    @objc private func digitConversionChanged(_ sender: NSSwitch) {
++        Settings.enableThaiDigitConversion = sender.state == .on
++        reload()
++    }
++
+     @objc private func codeEditorsChanged(_ sender: NSSwitch) {
+@@ -2535,6 +2588,7 @@
+ 
+         menu.addItem(.separator())
+         menu.addItem(presentationMenu())
++        menu.addItem(item(tr("Convert Thai ↔ Arabic Digits", "แปลงเลขไทย ↔ อารบิก"), #selector(convertSelectedDigits)))
+         // One menu for the whole feature: Off, Double Shift Only (fix on request) or Automatic. The rest is in Settings.
+@@ -2576,6 +2630,8 @@
+         return parent
+     }
+ 
++    @objc private func convertSelectedDigits() { autoFix.convertDigitsInSelection() }
++
+     @objc func pickUILanguage(_ s: NSMenuItem) {
+@@ -2656,6 +2712,10 @@
+             let key = HotKey(keyCode: s.keyCode, modifiers: s.modifiers) { [weak self] in self?.toggle(tool) }
+             if key.registered { presentationKeys.append(key) } else { failed.append(tool) }
+         }
++        let digitKey = HotKey(keyCode: kVK_ANSI_R, modifiers: controlKey | optionKey) { [weak self] in
++            self?.autoFix.convertDigitsInSelection()
++        }
++        if digitKey.registered { presentationKeys.append(digitKey) }
+         return failed
+     }
+     private func toggle(_ tool: PresentTool) {
