@@ -398,6 +398,7 @@ final class AutoFix {
         if !current.keys.isEmpty {
             convert(&current)
             learn(current)
+            last = current
         } else if var word = last {
             convert(&word)
             learn(word)
@@ -425,9 +426,9 @@ final class AutoFix {
         return .text(text)
     }
 
-    /// Convert selected digits, preferring Thai-to-Arabic if any Thai digit is present.
+    /// Convert selected digits, preferring Thai-to-Arabic if the selection contains any Thai digit.
     func convertDigitsInSelection() {
-        guard Settings.enableThaiDigitConversion, !AutoFix.terminals.contains(frontApp) else { return }
+        guard Settings.enableThaiDigitConversion else { return }
         switch AutoFix.accessibilitySelection() {
         case .text(let text): replaceDigits(text)
         case .none: return
@@ -449,9 +450,9 @@ final class AutoFix {
         guard !text.isEmpty, text.utf8.count <= 2000 else { return }
         let toArabic = text.unicodeScalars.contains { (0x0E50...0x0E59).contains($0.value) }
         let converted = String(String.UnicodeScalarView(text.unicodeScalars.map { scalar in
-            let value = scalar.value
-            if toArabic, (0x0E50...0x0E59).contains(value) { return Unicode.Scalar(value - 0x0E50 + 0x30)! }
-            if !toArabic, (0x30...0x39).contains(value) { return Unicode.Scalar(value + 0x0E50 - 0x30)! }
+            let v = scalar.value
+            if toArabic, (0x0E50...0x0E59).contains(v) { return Unicode.Scalar(v - 0x0E50 + 0x30)! }
+            if !toArabic, (0x30...0x39).contains(v) { return Unicode.Scalar(v + 0x0E50 - 0x30)! }
             return scalar
         }))
         guard converted != text else { return }
@@ -526,17 +527,17 @@ final class AutoFix {
     // MARK: Personal word list
 
     /// Should the word (or, mid-word, a word starting like it) be left as typed?
-    private func isKept(_ word: Word, prefix: Bool) -> Bool {
-        rules.contains { !$0.fix && $0.shown == word.shown && (prefix ? $0.keys.starts(with: word.keys) : $0.keys == word.keys) }
+    private func isKept(_ w: Word, prefix: Bool) -> Bool {
+        rules.contains { !$0.fix && $0.shown == w.shown && (prefix ? $0.keys.starts(with: w.keys) : $0.keys == w.keys) }
     }
 
-    /// A word the user just flipped with double Shift: back to typed layout means never fix; other means teach fix.
-    private func learn(_ word: Word) {
-        guard word.keys.count >= 2 else { return }
+    /// A word the user just flipped with double Shift. Back to typed layout means never fix; other means teach fix.
+    private func learn(_ w: Word) {
+        guard w.keys.count >= 2 else { return }
         var words = Settings.personalWords
-        let entry = "\(word.shown):\(word.keys.map { String(format: "%02x", $0) }.joined())"
-        words.removeAll { $0.hasPrefix("\(word.shown):") && $0.contains(word.keys.map { String(format: "%02x", $0) }.joined()) }
-        words.append(entry)
+        let key = w.keys.map { String(format: "%02x", $0) }.joined()
+        words.removeAll { $0.hasPrefix("\(w.shown):") && $0.contains(key) }
+        words.append("\(w.shown):\(key)")
         Settings.personalWords = Array(words.suffix(500))
     }
 
@@ -562,7 +563,7 @@ final class AutoFix {
         word.keys = keys
         word.shown = target
         word.typed = 1 - target
-        _ = lf_convert_word  // force bridge reference
+        _ = lf_convert_word
     }
 
     private func post(keyCode: Int, flags: CGEventFlags) {
@@ -688,7 +689,7 @@ final class HotKey {
             return noErr
         }
         InstallEventHandler(GetApplicationEventTarget(), callback, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handler)
-        let hotKeyID = EventHotKeyID(signature: OSType(0x434C_4750), id: id)  // "CLGP"
+        let hotKeyID = EventHotKeyID(signature: OSType(0x434C_4750), id: id)
         registered = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), hotKeyID, GetApplicationEventTarget(), 0, &ref) == noErr
     }
 }
@@ -726,7 +727,6 @@ final class BadgePreview: NSView {
 
     override func layout() {
         super.layout()
-        // The same offset as the real badge (see AppDelegate.follow()).
         let s = badge.scale, size = BadgeView.size(style: badge.style, scale: s, code: code)
         badge.frame = NSRect(x: (pointer.x + 12 * s).rounded(), y: (pointer.y - 22 * s - size.height / 2).rounded(),
                              width: size.width, height: size.height)
@@ -791,7 +791,6 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    /// After a change made somewhere else (the menu, a shortcut): shows it, if the window is open.
     func reload() {
         guard window?.isVisible == true, !reloadPending else { return }
         reloadPending = true
@@ -802,7 +801,6 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    /// The keyboard language changed: the preview follows it, unless a language was picked in the list.
     func inputChanged() {
         if previewCode == nil { preview.code = InputSource.currentCode() }
     }
@@ -826,11 +824,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         window = w
     }
 
-    /// Fills every tab in the menu's current language, keeping the selected one.
     private func build() {
         window?.makeFirstResponder(nil)
-        let titles = [tr("Badge", "ป้ายภาษา"), tr("Fix Wrong Language", "แก้คำผิดภาษา"), tr("Presentation", "นำเสนอ"),
-                      tr("General", "ทั่วไป")]
+        let titles = [tr("Badge", "ป้ายภาษา"), tr("Fix Wrong Language", "แก้คำผิดภาษา"), tr("Presentation", "นำเสนอ"), tr("General", "ทั่วไป")]
         let views = [badgeTab(), fixTab(), presentationTab(), generalTab()]
         for (i, item) in tabs.tabViewItems.enumerated() {
             item.label = titles[i]
@@ -838,10 +834,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             guard let page = item.viewController?.view else { continue }
             page.subviews = [views[i]]
             views[i].translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                views[i].topAnchor.constraint(equalTo: page.topAnchor),
-                views[i].leadingAnchor.constraint(equalTo: page.leadingAnchor),
-            ])
+            NSLayoutConstraint.activate([views[i].topAnchor.constraint(equalTo: page.topAnchor), views[i].leadingAnchor.constraint(equalTo: page.leadingAnchor)])
         }
         window?.title = tabs.tabViewItems[tabs.selectedTabViewItemIndex].label
         tabs.fitWindow()
@@ -856,74 +849,36 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         if let previewCode, !languages.contains(where: { $0.code == previewCode }) { self.previewCode = nil }
         preview.code = previewCode ?? current
         preview.update()
-
         let looks = NSGridView(views: [
-            [label(tr("Show:", "แสดง:")), popup(DisplayMode.allCases.map { ($0.rawValue, $0.title) }, Settings.mode.rawValue,
-                                               #selector(AppDelegate.pickMode))],
-            [label(tr("Style:", "รูปแบบ:")), popup(BadgeStyle.allCases.map { ($0.rawValue, $0.title) }, Settings.style.rawValue,
-                                                 #selector(AppDelegate.pickStyle))],
-            [label(tr("Size:", "ขนาด:")), popup(BadgeSize.allCases.map { ($0.rawValue, $0.title) }, Settings.size.rawValue,
-                                               #selector(AppDelegate.pickSize))],
+            [label(tr("Show:", "แสดง:")), popup(DisplayMode.allCases.map { ($0.rawValue, $0.title) }, Settings.mode.rawValue, #selector(AppDelegate.pickMode))],
+            [label(tr("Style:", "รูปแบบ:")), popup(BadgeStyle.allCases.map { ($0.rawValue, $0.title) }, Settings.style.rawValue, #selector(AppDelegate.pickStyle))],
+            [label(tr("Size:", "ขนาด:")), popup(BadgeSize.allCases.map { ($0.rawValue, $0.title) }, Settings.size.rawValue, #selector(AppDelegate.pickSize))],
             [label(tr("Border:", "เส้นขอบ:")), toggle(Settings.badgeBorder, #selector(toggleBorder(_:)))],
         ])
         looks.rowSpacing = 8
         looks.column(at: 0).xPlacement = .trailing
         looks.rowAlignment = .firstBaseline
         looks.setContentHuggingPriority(.required, for: .vertical)
-        let top = NSStackView(views: [preview, looks])
-        top.spacing = 20
-        top.alignment = .top
-
-        wells = []
-        resets = []
+        let top = NSStackView(views: [preview, looks]); top.spacing = 20; top.alignment = .top
+        wells = []; resets = []
         let rows: [[NSView]] = languages.enumerated().map { i, lang in
             let name = NSMutableAttributedString(string: lang.code, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
-            if !lang.layouts.isEmpty {
-                name.append(NSAttributedString(string: "   " + lang.layouts.joined(separator: ", "),
-                                               attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
-                                                            .foregroundColor: NSColor.secondaryLabelColor]))
-            }
-            let title = NSTextField(labelWithAttributedString: name)
-            title.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
-            let show = toggle(!Settings.hidden.contains(lang.code), #selector(toggleLanguage(_:)))
-            show.tag = i
-            let well = NSColorWell()
-            well.color = Palette.color(for: lang.code)
-            well.target = self
-            well.action = #selector(colorChanged(_:))
-            well.tag = i
-            well.widthAnchor.constraint(equalToConstant: 44).isActive = true
-            well.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            if !lang.layouts.isEmpty { name.append(NSAttributedString(string: "   " + lang.layouts.joined(separator: ", "), attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize), .foregroundColor: NSColor.secondaryLabelColor])) }
+            let title = NSTextField(labelWithAttributedString: name); title.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+            let show = toggle(!Settings.hidden.contains(lang.code), #selector(toggleLanguage(_:))); show.tag = i
+            let well = NSColorWell(); well.color = Palette.color(for: lang.code); well.target = self; well.action = #selector(colorChanged(_:)); well.tag = i
+            well.widthAnchor.constraint(equalToConstant: 44).isActive = true; well.heightAnchor.constraint(equalToConstant: 24).isActive = true
             wells.append(well)
-            let reset = NSButton(title: tr("Default", "สีเดิม"), target: self, action: #selector(resetColor(_:)))
-            reset.tag = i
-            reset.controlSize = .small
-            reset.isEnabled = Palette.hasCustomColor(for: lang.code)
-            resets.append(reset)
+            let reset = NSButton(title: tr("Default", "สีเดิม"), target: self, action: #selector(resetColor(_:))); reset.tag = i; reset.controlSize = .small
+            reset.isEnabled = Palette.hasCustomColor(for: lang.code); resets.append(reset)
             return [title, well, reset, show]
         }
-        let column = { (text: String) -> NSTextField in
-            let l = NSTextField(labelWithString: text)
-            l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            l.textColor = .secondaryLabelColor
-            l.setContentCompressionResistancePriority(.required, for: .horizontal)
-            return l
-        }
-        let list = NSGridView(views: [[column(tr("Keyboard", "แป้นพิมพ์")), column(tr("Color", "สี")), NSGridCell.emptyContentView,
-                                       column(tr("Show badge", "แสดงป้าย"))]] + rows)
-        list.column(at: 3).xPlacement = .center
-        list.row(at: 0).bottomPadding = -2
-        list.rowSpacing = 8
-        list.columnSpacing = 12
-        list.rowAlignment = .none
+        let column = { (text: String) -> NSTextField in let l = NSTextField(labelWithString: text); l.font = .systemFont(ofSize: NSFont.smallSystemFontSize); l.textColor = .secondaryLabelColor; l.setContentCompressionResistancePriority(.required, for: .horizontal); return l }
+        let list = NSGridView(views: [[column(tr("Keyboard", "แป้นพิมพ์")), column(tr("Color", "สี")), NSGridCell.emptyContentView, column(tr("Show badge", "แสดงป้าย"))]] + rows)
+        list.column(at: 3).xPlacement = .center; list.row(at: 0).bottomPadding = -2; list.rowSpacing = 8; list.columnSpacing = 12; list.rowAlignment = .none
         for r in 0..<list.numberOfRows { list.row(at: r).yPlacement = .center }
-
-        let heading = NSStackView(views: [header(tr("Languages", "ภาษา")),
-                                          caption(tr("The keyboards added in System Settings → Keyboard → Input Sources.",
-                                                     "แป้นพิมพ์ที่เพิ่มไว้ใน System Settings → Keyboard → Input Sources"))])
-        heading.orientation = .vertical
-        heading.alignment = .leading
-        heading.spacing = 2
+        let heading = NSStackView(views: [header(tr("Languages", "ภาษา")), caption(tr("The keyboards added in System Settings → Keyboard → Input Sources.", "แป้นพิมพ์ที่เพิ่มไว้ใน System Settings → Keyboard → Input Sources"))])
+        heading.orientation = .vertical; heading.alignment = .leading; heading.spacing = 2
         return tab([top, heading, list])
     }
 
@@ -932,469 +887,158 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         let mode = Settings.fixMode
         let modes: [(FixMode, String)] = [
             (.off, tr("Nothing is fixed, and CursorLingo doesn't look at your typing at all.", "ไม่แก้อะไรให้ และไม่ดูสิ่งที่คุณพิมพ์เลย")),
-            (.manual, tr("Tap Shift twice to switch the last word (or the selected text) to the other language.",
-                         "พิมพ์ผิดภาษาเมื่อไหร่ กด Shift 2 ครั้งติดกัน คำล่าสุด (หรือข้อความที่เลือกไว้) จะเปลี่ยนเป็นอีกภาษาให้")),
-            (.automatic, tr("Words typed in the wrong language are fixed as you type. If a fix is wrong, double Shift puts it back.",
-                            "แก้คำที่พิมพ์ผิดภาษาให้เองระหว่างพิมพ์ ถ้าแก้ไม่ตรงใจ กด Shift 2 ครั้งเพื่อย้อนคืน")),
+            (.manual, tr("Tap Shift twice to switch the last word (or the selected text) to the other language.", "พิมพ์ผิดภาษาเมื่อไหร่ กด Shift 2 ครั้งติดกัน คำล่าสุด (หรือข้อความที่เลือกไว้) จะเปลี่ยนเป็นอีกภาษาให้")),
+            (.automatic, tr("Words typed in the wrong language are fixed as you type. If a fix is wrong, double Shift puts it back.", "แก้คำที่พิมพ์ผิดภาษาให้เองระหว่างพิมพ์ ถ้าแก้ไม่ตรงใจ กด Shift 2 ครั้งเพื่อย้อนคืน")),
         ]
         var views: [NSView] = [header(tr("Fix Wrong Language (EN ⇄ TH)", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH)"))]
-        for (i, (mode, detail)) in modes.enumerated() {
-            let radio = NSButton(radioButtonWithTitle: mode.title, target: self, action: #selector(fixModeChanged(_:)))
-            radio.tag = i
-            radio.state = mode == Settings.fixMode ? .on : .off
-            let detailText = caption(detail)
-            detailText.preferredMaxLayoutWidth = 450
-            let item = NSStackView(views: [radio, indented(detailText)])
-            item.orientation = .vertical
-            item.alignment = .leading
-            item.spacing = 2
-            views.append(item)
+        for (i, (m, detail)) in modes.enumerated() {
+            let radio = NSButton(radioButtonWithTitle: m.title, target: self, action: #selector(fixModeChanged(_:))); radio.tag = i; radio.state = m == mode ? .on : .off
+            let detailText = caption(detail); detailText.preferredMaxLayoutWidth = 450
+            let item = NSStackView(views: [radio, indented(detailText)]); item.orientation = .vertical; item.alignment = .leading; item.spacing = 2; views.append(item)
         }
         views.append(separator())
-        views.append(optionRow(tr("Enable Thai Digit Conversion (0-9 ↔ ๐-๙)", "เปิดใช้งานการแปลงเลขไทย ↔ อารบิก (0-9 ↔ ๐-๙)"),
-                               tr("Select text and use ⌃⌥R to convert digits.", "เลือกข้อความแล้วกด ⌃⌥R เพื่อแปลงตัวเลข"),
-                               toggle(Settings.enableThaiDigitConversion, #selector(digitConversionChanged(_:)))))
+        views.append(optionRow(tr("Enable Thai Digit Conversion (0-9 ↔ ๐-๙)", "เปิดใช้งานการแปลงเลขไทย ↔ อารบิก (0-9 ↔ ๐-๙)"), tr("Select text and use ⌃⌥R to convert digits.", "เลือกข้อความแล้วกด ⌃⌥R เพื่อแปลงตัวเลข"), toggle(Settings.enableThaiDigitConversion, #selector(digitConversionChanged(_:)))))
         if mode != .off {
-            let status = app.autoFix.status
-            let dot = NSTextField(labelWithString: "●")
-            dot.textColor = status.problem == nil ? .systemGreen : .systemOrange
+            let status = app.autoFix.status; let dot = NSTextField(labelWithString: "●"); dot.textColor = status.problem == nil ? .systemGreen : .systemOrange
             var parts: [NSView] = [dot, label(status.text)]
-            if status.problem == .permission {
-                parts.append(button(tr("Open Privacy Settings…", "เปิด Privacy & Security…"), #selector(AppDelegate.openPrivacySettings), app))
-            }
-            if status.problem == .notRunning {
-                parts.append(button(tr("Relaunch CursorLingo", "เปิด CursorLingo ใหม่"), #selector(AppDelegate.relaunch), app))
-            }
+            if status.problem == .permission { parts.append(button(tr("Open Privacy Settings…", "เปิด Privacy & Security…"), #selector(AppDelegate.openPrivacySettings), app)) }
+            if status.problem == .notRunning { parts.append(button(tr("Relaunch CursorLingo", "เปิด CursorLingo ใหม่"), #selector(AppDelegate.relaunch), app)) }
             views.append(line(parts))
         }
-        let editors = toggle(Settings.codeEditorsManual, #selector(codeEditorsChanged(_:)))
-        editors.isEnabled = mode == .automatic
-        views.append(optionRow(tr("Code editors: fix only on double Shift", "โปรแกรมเขียนโค้ด: แก้เฉพาะตอนกด Shift 2 ครั้ง"),
-                               tr("Names in code often look like wrong-language words, so these apps aren't fixed automatically: "
-                                  + AutoFix.codeEditorNames + ". Terminals (" + AutoFix.terminalNames + ") never are, whatever this is set to. "
-                                  + "Both lists come with CursorLingo; ask for more on GitHub.",
-                                  "ชื่อตัวแปรในโค้ดหน้าตาคล้ายคำพิมพ์ผิดภาษาบ่อยๆ เลยไม่แก้เองในแอปพวกนี้: " + AutoFix.codeEditorNames
-                                  + " ส่วน Terminal (" + AutoFix.terminalNames + ") ไม่แก้เองเลย ไม่ว่าจะตั้งตรงนี้ไว้ยังไง "
-                                  + "รายชื่อแอปมีมากับ CursorLingo อยากให้เพิ่มแอปไหน บอกได้ที่ GitHub"),
-                               editors))
-        let learned = app.autoFix.rules.count
-        let forget = button(tr("Forget", "ล้าง"), #selector(AppDelegate.forgetLearned), app)
-        forget.isEnabled = learned > 0
-        views.append(optionRow(learned == 0 ? tr("Learned words: none yet", "คำที่จำไว้: ยังไม่มี")
-                                            : tr("Learned words: \(learned)", "คำที่จำไว้: \(learned) คำ"),
-                               tr("When you convert or undo a word with double Shift, CursorLingo remembers it and does the same next time. Kept on this Mac only.",
-                                  "คำไหนที่คุณกด Shift 2 ครั้งเพื่อแปลงหรือย้อนคืน จะถูกจำไว้ แล้วครั้งหน้าทำแบบเดียวกันให้เอง เก็บไว้ในเครื่องนี้เท่านั้น"),
-                               forget))
+        let editors = toggle(Settings.codeEditorsManual, #selector(codeEditorsChanged(_:))); editors.isEnabled = mode == .automatic
+        views.append(optionRow(tr("Code editors: fix only on double Shift", "โปรแกรมเขียนโค้ด: แก้เฉพาะตอนกด Shift 2 ครั้ง"), tr("Names in code often look like wrong-language words, so these apps aren't fixed automatically: " + AutoFix.codeEditorNames + ". Terminals (" + AutoFix.terminalNames + ") never are, whatever this is set to. Both lists come with CursorLingo; ask for more on GitHub.", "ชื่อตัวแปรในโค้ดหน้าตาคล้ายคำพิมพ์ผิดภาษาบ่อยๆ เลยไม่แก้เองในแอปพวกนี้: " + AutoFix.codeEditorNames + " ส่วน Terminal (" + AutoFix.terminalNames + ") ไม่แก้เองเลย ไม่ว่าจะตั้งตรงนี้ไว้ยังไง รายชื่อแอปมีมากับ CursorLingo อยากให้เพิ่มแอปไหน บอกได้ที่ GitHub"), editors))
+        let learned = app.autoFix.rules.count; let forget = button(tr("Forget", "ล้าง"), #selector(AppDelegate.forgetLearned), app); forget.isEnabled = learned > 0
+        views.append(optionRow(learned == 0 ? tr("Learned words: none yet", "คำที่จำไว้: ยังไม่มี") : tr("Learned words: \(learned)", "คำที่จำไว้: \(learned) คำ"), tr("When you convert or undo a word with double Shift, CursorLingo remembers it and does the same next time. Kept on this Mac only.", "คำไหนที่คุณกด Shift 2 ครั้งเพื่อแปลงหรือย้อนคืน จะถูกจำไว้ แล้วครั้งหน้าทำแบบเดียวกันให้เอง เก็บไว้ในเครื่องนี้เท่านั้น"), forget))
         views.append(separator())
-        views.append(optionRow(tr("Remember language per app", "จำภาษาของแต่ละแอป"),
-                               tr("Going back to an app switches to the keyboard you last used there. Works even with fixing off.",
-                                  "กลับไปแอปไหน ก็สลับเป็นภาษาที่ใช้ล่าสุดในแอปนั้นให้เอง ใช้ได้แม้จะปิดการแก้คำไว้"),
-                               toggle(Settings.perAppLanguage, #selector(perAppChanged(_:)))))
+        views.append(optionRow(tr("Remember language per app", "จำภาษาของแต่ละแอป"), tr("Going back to an app switches to the keyboard you last used there. Works even with fixing off.", "กลับไปแอปไหน ก็สลับเป็นภาษาที่ใช้ล่าสุดในแอปนั้นให้เอง ใช้ได้แม้จะปิดการแก้คำไว้"), toggle(Settings.perAppLanguage, #selector(perAppChanged(_:)))))
         return tab(views)
     }
 
     private func presentationTab() -> NSView {
         guard let app else { return NSView() }
         let tools: [(PresentTool, Bool, Selector, String)] = [
-            (.spotlight, app.presenter.spotlight, #selector(spotlightChanged(_:)),
-             tr("Dims the screen except for a circle around the pointer. You can still click and type as usual.",
-                "หรี่จอ เหลือวงกลมใสรอบเมาส์ ยังคลิกและพิมพ์ได้ตามปกติ")),
-            (.zoom, app.presenter.zoom, #selector(zoomToolChanged(_:)),
-             tr("Magnifies what is under the pointer, inside the circle. Needs Screen Recording permission.",
-                "ขยายจุดที่เมาส์ชี้ให้ใหญ่ขึ้นในวงกลม (ต้องอนุญาต Screen Recording ก่อน)")),
-            (.draw, app.presenter.drawing, #selector(drawChanged(_:)),
-             tr("Draw over the screen with the mouse. While it's on, clicks draw instead of reaching apps; Esc stops.",
-                "ลากเมาส์ขีดเขียนบนจอได้เลย ระหว่างนี้คลิกจะเป็นการวาด ไม่โดนแอปข้างใต้ กด Esc เพื่อเลิกวาด")),
+            (.spotlight, app.presenter.spotlight, #selector(spotlightChanged(_:)), tr("Dims the screen except for a circle around the pointer. You can still click and type as usual.", "หรี่จอ เหลือวงกลมใสรอบเมาส์ ยังคลิกและพิมพ์ได้ตามปกติ")),
+            (.zoom, app.presenter.zoom, #selector(zoomToolChanged(_:)), tr("Magnifies what is under the pointer, inside the circle. Needs Screen Recording permission.", "ขยายจุดที่เมาส์ชี้ให้ใหญ่ขึ้นในวงกลม (ต้องอนุญาต Screen Recording ก่อน)")),
+            (.draw, app.presenter.drawing, #selector(drawChanged(_:)), tr("Draw over the screen with the mouse. While it's on, clicks draw instead of reaching apps; Esc stops.", "ลากเมาส์ขีดเขียนบนจอได้เลย ระหว่างนี้คลิกจะเป็นการวาด ไม่โดนแอปข้างใต้ กด Esc เพื่อเลิกวาด")),
         ]
         shortcutFields = [:]
-        let heading = NSStackView(views: [header(tr("Tools", "เครื่องมือ")),
-                                          caption(tr("To change a shortcut, click it and press the new keys (⌃, ⌥ or ⌘ with a letter, "
-                                                     + "number or F-key). Delete clears it.",
-                                                     "อยากเปลี่ยนคีย์ลัด คลิกที่ช่องแล้วกดคีย์ใหม่ (⌃ ⌥ หรือ ⌘ คู่กับตัวอักษร ตัวเลข หรือปุ่ม F) "
-                                                     + "ถ้าไม่อยากใช้คีย์ลัด กด Delete"))])
-        heading.orientation = .vertical
-        heading.alignment = .leading
-        heading.spacing = 2
+        let heading = NSStackView(views: [header(tr("Tools", "เครื่องมือ")), caption(tr("To change a shortcut, click it and press the new keys (⌃, ⌥ or ⌘ with a letter, number or F-key). Delete clears it.", "อยากเปลี่ยนคีย์ลัด คลิกที่ช่องแล้วกดคีย์ใหม่ (⌃ ⌥ หรือ ⌘ คู่กับตัวอักษร ตัวเลข หรือปุ่ม F) ถ้าไม่อยากใช้คีย์ลัด กด Delete"))]); heading.orientation = .vertical; heading.alignment = .leading; heading.spacing = 2
         var views: [NSView] = [heading]
         for (tool, on, action, detail) in tools {
-            let field = ShortcutField()
-            field.shortcut = Settings.shortcut(tool)
-            field.onRecord = { [weak self] shortcut in self?.setShortcut(tool, shortcut) }
-            field.onListening = { [weak app] listening in app?.pauseShortcuts(listening) }
-            field.widthAnchor.constraint(equalToConstant: 104).isActive = true
-            field.toolTip = tr("Click, then press the new keys. Delete clears it.", "คลิกแล้วกดคีย์ใหม่ กด Delete เพื่อล้าง")
-            shortcutFields[tool] = field
-            let onOff = toggle(on, action)
-            if tool == .zoom { onOff.isEnabled = Presenter.zoomAvailable }
-            let controls = NSStackView(views: [field, onOff])
-            controls.spacing = 14
-            let name = label(tool.title)
-            let heading = NSStackView(views: [name, controls])
-            heading.spacing = 18
-            heading.alignment = .centerY
-            let detailText = caption(detail)
-            detailText.preferredMaxLayoutWidth = 450
-            views.append(NSStackView(views: [heading, indented(detailText)]))
+            let field = ShortcutField(); field.shortcut = Settings.shortcut(tool); field.onRecord = { [weak self] s in self?.setShortcut(tool, s) }; field.onListening = { [weak app] listening in app?.pauseShortcuts(listening) }; field.widthAnchor.constraint(equalToConstant: 104).isActive = true; field.toolTip = tr("Click, then press the new keys. Delete clears it.", "คลิกแล้วกดคีย์ใหม่ กด Delete เพื่อล้าง"); shortcutFields[tool] = field
+            let onOff = toggle(on, action); if tool == .zoom { onOff.isEnabled = Presenter.zoomAvailable }
+            let controls = NSStackView(views: [field, onOff]); controls.spacing = 14
+            let name = label(tool.title); let h = NSStackView(views: [name, controls]); h.spacing = 18; h.alignment = .centerY
+            let detailText = caption(detail); detailText.preferredMaxLayoutWidth = 450; views.append(NSStackView(views: [h, indented(detailText)]))
         }
         views.append(separator())
-        views.append(optionRow(tr("Circle size", "ขนาดวงกลม"),
-                               tr("Control–Option + scroll also changes this while a tool is on.", "กด Control–Option แล้วเลื่อนล้อเมาส์เพื่อปรับขนาดได้ด้วย"),
-                               slider(40, 300, Double(app.presenter.radius), #selector(spotlightSizeChanged(_:)))))
-        views.append(optionRow(tr("Zoom", "ระดับซูม"),
-                               tr("Control–Option + = / − changes the magnification while zoom is on.", "กด Control–Option + = / − เพื่อปรับระดับซูม"),
-                               slider(1.5, 8, Double(app.presenter.zoomLevel), #selector(zoomLevelChanged(_:)))))
-        views.append(caption(tr("⌘Z undoes the last stroke. Esc stops drawing, then turns off all the tools.",
-                                "กด ⌘Z เพื่อลบเส้นล่าสุด กด Esc เพื่อเลิกวาด แล้วกดอีกครั้งเพื่อปิดเครื่องมือทั้งหมด")))
-        let stack = NSStackView(views: views)
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
+        views.append(optionRow(tr("Circle size", "ขนาดวงกลม"), tr("Control–Option + scroll also changes this while a tool is on.", "กด Control–Option แล้วเลื่อนล้อเมาส์เพื่อปรับขนาดได้ด้วย"), slider(40, 300, Double(app.presenter.radius), #selector(spotlightSizeChanged(_:)))))
+        views.append(optionRow(tr("Zoom", "ระดับซูม"), tr("Control–Option + = / − changes the magnification while zoom is on.", "กด Control–Option + = / − เพื่อปรับระดับซูม"), slider(1.5, 8, Double(app.presenter.zoomLevel), #selector(zoomLevelChanged(_:)))))
+        views.append(caption(tr("⌘Z undoes the last stroke. Esc stops drawing, then turns off all the tools.", "กด ⌘Z เพื่อลบเส้นล่าสุด กด Esc เพื่อเลิกวาด แล้วกดอีกครั้งเพื่อปิดเครื่องมือทั้งหมด")))
+        let stack = NSStackView(views: views); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         return stack
     }
 
-    private func generalTab() -> NSView {
-        guard let app else { return NSView() }
+    private func generalTab() -> NSView { guard let app else { return NSView() }; return generalTabContent(app) }
+    private func generalTabContent(_ app: AppDelegate) -> NSView {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        let language = popup(UILanguage.allCases.map { ($0.rawValue, $0.title) }, Settings.uiLanguage.rawValue,
-                             #selector(AppDelegate.pickUILanguage))
-
-        let icon = NSImageView(image: NSApp.applicationIconImage)
-        icon.widthAnchor.constraint(equalToConstant: 48).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        let name = NSTextField(labelWithString: "CursorLingo")
-        name.font = .systemFont(ofSize: 15, weight: .semibold)
-        let about = NSStackView(views: [name, caption(tr("Version \(version) · Free and open source · No network access, no tracking",
-                                                          "เวอร์ชัน \(version) · ฟรีและโอเพนซอร์ส · ไม่ต่อเน็ต ไม่เก็บข้อมูลการใช้งาน"))])
-        about.orientation = .vertical
-        about.alignment = .leading
-        about.spacing = 2
-        let top = NSStackView(views: [icon, about])
-        top.spacing = 12
-
-        let pitch = caption(tr("CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub, a "
-                               + "share with friends or a coffee means a lot. Got an idea, a word it got wrong, or some code? "
-                               + "Come say hi.",
-                               "CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ "
-                               + "ฝากกดดาวบน GitHub แชร์ให้เพื่อนๆ หรือเลี้ยงกาแฟสักแก้วก็ได้นะ "
-                               + "มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"))
-        let support = NSStackView(views: [
-            header(tr("Support CursorLingo", "สนับสนุน CursorLingo")),
-            pitch,
-            line(NSButton(title: tr("★ Star on GitHub", "★ ให้ดาวบน GitHub"), target: self, action: #selector(openRepo)),
-                 NSButton(title: tr("How to Contribute", "วิธีร่วมพัฒนา"), target: self, action: #selector(openContributing)),
-                 NSButton(title: tr("☕ Buy a Coffee on Ko-fi", "☕ เลี้ยงกาแฟผ่าน Ko-fi"), target: self, action: #selector(openKofi))),
-            promptPayBox(),
-        ])
-        support.orientation = .vertical
-        support.alignment = .leading
-        support.spacing = 8
-
-        return tab([
-            top,
-            separator(),
-            optionRow(tr("Open at login", "เปิด CursorLingo อัตโนมัติ"),
-                      tr("Starts by itself when you log in to your Mac, so the badge is always there.",
-                         "เปิดเครื่องหรือล็อกอินเมื่อไหร่ CursorLingo ก็ทำงานเลย ไม่ต้องคอยเปิดเอง"),
-                      toggle(LoginItem.isEnabled, #selector(loginChanged(_:)))),
-            optionRow("Language / ภาษา", tr("The language of the menu and this window.", "ภาษาที่ใช้ในเมนูและหน้าต่างนี้"), language),
-            optionRow(tr("Found a wrong fix or a bug?", "เจอคำที่แก้ผิด หรือเจอบั๊ก?"),
-                      tr("Opens the report form on GitHub in your browser. Nothing you typed is attached.",
-                         "จะเปิดหน้าแจ้งปัญหาบน GitHub ในเบราว์เซอร์ ไม่มีอะไรที่คุณพิมพ์ติดไปด้วย"),
-                      button(tr("Report…", "แจ้งปัญหา…"), #selector(AppDelegate.reportIssue), app)),
-            separator(),
-            support,
-        ])
+        let language = popup(UILanguage.allCases.map { ($0.rawValue, $0.title) }, Settings.uiLanguage.rawValue, #selector(AppDelegate.pickUILanguage))
+        let icon = NSImageView(image: NSApp.applicationIconImage); icon.widthAnchor.constraint(equalToConstant: 48).isActive = true; icon.heightAnchor.constraint(equalToConstant: 48).isActive = true
+        let name = NSTextField(labelWithString: "CursorLingo"); name.font = .systemFont(ofSize: 15, weight: .semibold)
+        let about = NSStackView(views: [name, caption(tr("Version \(version) · Free and open source · No network access, no tracking", "เวอร์ชัน \(version) · ฟรีและโอเพนซอร์ส · ไม่ต่อเน็ต ไม่เก็บข้อมูลการใช้งาน"))]); about.orientation = .vertical; about.alignment = .leading; about.spacing = 2
+        let top = NSStackView(views: [icon, about]); top.spacing = 12
+        let pitch = caption(tr("CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub, a share with friends or a coffee means a lot. Got an idea, a word it got wrong, or some code? Come say hi.", "CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ ฝากกดดาวบน GitHub แชร์ให้เพื่อนๆ หรือเลี้ยงกาแฟสักแก้วก็ได้นะ มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"))
+        let support = NSStackView(views: [header(tr("Support CursorLingo", "สนับสนุน CursorLingo")), pitch, line(NSButton(title: tr("★ Star on GitHub", "★ ให้ดาวบน GitHub"), target: self, action: #selector(openRepo)), NSButton(title: tr("How to Contribute", "วิธีร่วมพัฒนา"), target: self, action: #selector(openContributing)), NSButton(title: tr("☕ Buy a Coffee on Ko-fi", "☕ เลี้ยงกาแฟผ่าน Ko-fi"), target: self, action: #selector(openKofi))), promptPayBox()]); support.orientation = .vertical; support.alignment = .leading; support.spacing = 8
+        return tab([top, separator(), optionRow(tr("Open at login", "เปิด CursorLingo อัตโนมัติ"), tr("Starts by itself when you log in to your Mac, so the badge is always there.", "เปิดเครื่องหรือล็อกอินเมื่อไหร่ CursorLingo ก็ทำงานเลย ไม่ต้องคอยเปิดเอง"), toggle(LoginItem.isEnabled, #selector(loginChanged(_:)))), optionRow("Language / ภาษา", tr("The language of the menu and this window.", "ภาษาที่ใช้ในเมนูและหน้าต่างนี้"), language), optionRow(tr("Found a wrong fix or a bug?", "เจอคำที่แก้ผิด หรือเจอบั๊ก?"), tr("Opens the report form on GitHub in your browser. Nothing you typed is attached.", "จะเปิดหน้าแจ้งปัญหาบน GitHub ในเบราว์เซอร์ ไม่มีอะไรที่คุณพิมพ์ติดไปด้วย"), button(tr("Report…", "แจ้งปัญหา…"), #selector(AppDelegate.reportIssue), app)), separator(), support])
     }
 
     // MARK: Actions
 
-    @objc private func fixModeChanged(_ sender: NSButton) {
-        let item = NSMenuItem()
-        item.representedObject = [FixMode.off, .manual, .automatic][sender.tag].rawValue
-        app?.pickFixMode(item)
-        reload()
-    }
-
-    @objc private func loginChanged(_ sender: NSSwitch) {
-        if (sender.state == .on) != LoginItem.isEnabled { app?.toggleLogin() }
-    }
-
-    @objc private func openRepo() {
-        if let url = URL(string: "https://github.com/kittipongint/cursor-lingo") { NSWorkspace.shared.open(url) }
-    }
-
-    @objc private func openKofi() {
-        if let url = URL(string: "https://ko-fi.com/kintstudio") { NSWorkspace.shared.open(url) }
-    }
-
-    @objc private func copyPromptPay(_ sender: NSButton) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(PromptPay.number, forType: .string)
-        sender.title = tr("Copied ✓", "คัดลอกแล้ว ✓")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { sender.title = tr("Copy Number", "คัดลอกเลข") }
-    }
-
-    @objc private func openContributing() {
-        if let url = URL(string: "https://github.com/kittipongint/cursor-lingo/blob/main/CONTRIBUTING.md") { NSWorkspace.shared.open(url) }
-    }
-
-    @objc private func spotlightChanged(_ sender: NSSwitch) {
-        if (sender.state == .on) != app?.presenter.spotlight { app?.toggleSpotlight() }
-    }
-
-    @objc private func zoomToolChanged(_ sender: NSSwitch) {
-        if (sender.state == .on) != app?.presenter.zoom { app?.toggleZoom() }
-        reload()
-    }
-
-    @objc private func drawChanged(_ sender: NSSwitch) {
-        if (sender.state == .on) != app?.presenter.drawing { app?.toggleDrawing() }
-    }
-
-    @objc private func digitConversionChanged(_ sender: NSSwitch) {
-        Settings.enableThaiDigitConversion = sender.state == .on
-        reload()
-    }
-
-    @objc private func codeEditorsChanged(_ sender: NSSwitch) {
-        if (sender.state == .on) != Settings.codeEditorsManual { app?.toggleCodeEditorsManual() }
-    }
-
-    @objc private func perAppChanged(_ sender: NSSwitch) {
-        if (sender.state == .on) != Settings.perAppLanguage { app?.togglePerAppLanguage() }
-    }
-
-    @objc private func toggleBorder(_ sender: NSControl) {
-        Settings.badgeBorder = (sender as? NSSwitch)?.state == .on
-        preview.update()
-        app?.refresh(animated: false)
-    }
-
-    @objc private func toggleLanguage(_ sender: NSSwitch) {
-        let code = languages[sender.tag].code
-        var hidden = Settings.hidden
-        if sender.state == .on { hidden.remove(code) } else { hidden.insert(code) }
-        Settings.hidden = hidden
-        previewCode = code
-        preview.code = code
-        app?.refresh(animated: true)
-    }
-
-    @objc private func colorChanged(_ sender: NSColorWell) {
-        let code = languages[sender.tag].code
-        Palette.setColor(sender.color, for: code)
-        resets[sender.tag].isEnabled = Palette.hasCustomColor(for: code)
-        previewCode = code
-        preview.code = code
-        app?.refresh(animated: true)
-    }
-
-    @objc private func resetColor(_ sender: NSButton) {
-        let code = languages[sender.tag].code
-        Palette.setColor(nil, for: code)
-        wells[sender.tag].color = Palette.color(for: code)
-        sender.isEnabled = false
-        previewCode = code
-        preview.code = code
-        app?.refresh(animated: true)
-    }
-
-    @objc private func colorChanged(_ sender: NSColorWell) { }
-
+    @objc private func fixModeChanged(_ sender: NSButton) { let item = NSMenuItem(); item.representedObject = [FixMode.off, .manual, .automatic][sender.tag].rawValue; app?.pickFixMode(item); reload() }
+    @objc private func loginChanged(_ sender: NSSwitch) { if (sender.state == .on) != LoginItem.isEnabled { app?.toggleLogin() } }
+    @objc private func openRepo() { if let url = URL(string: "https://github.com/kittipongint/cursor-lingo") { NSWorkspace.shared.open(url) } }
+    @objc private func openKofi() { if let url = URL(string: "https://ko-fi.com/kintstudio") { NSWorkspace.shared.open(url) } }
+    @objc private func copyPromptPay(_ sender: NSButton) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(PromptPay.number, forType: .string); sender.title = tr("Copied ✓", "คัดลอกแล้ว ✓"); DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { sender.title = tr("Copy Number", "คัดลอกเลข") } }
+    @objc private func openContributing() { if let url = URL(string: "https://github.com/kittipongint/cursor-lingo/blob/main/CONTRIBUTING.md") { NSWorkspace.shared.open(url) } }
+    @objc private func spotlightChanged(_ sender: NSSwitch) { if (sender.state == .on) != app?.presenter.spotlight { app?.toggleSpotlight() } }
+    @objc private func zoomToolChanged(_ sender: NSSwitch) { if (sender.state == .on) != app?.presenter.zoom { app?.toggleZoom() }; reload() }
+    @objc private func drawChanged(_ sender: NSSwitch) { if (sender.state == .on) != app?.presenter.drawing { app?.toggleDrawing() } }
+    @objc private func digitConversionChanged(_ sender: NSSwitch) { Settings.enableThaiDigitConversion = sender.state == .on; reload() }
+    @objc private func codeEditorsChanged(_ sender: NSSwitch) { if (sender.state == .on) != Settings.codeEditorsManual { app?.toggleCodeEditorsManual() } }
+    @objc private func perAppChanged(_ sender: NSSwitch) { if (sender.state == .on) != Settings.perAppLanguage { app?.togglePerAppLanguage() } }
+    @objc private func toggleBorder(_ sender: NSControl) { Settings.badgeBorder = (sender as? NSSwitch)?.state == .on; preview.update(); app?.refresh(animated: false) }
+    @objc private func toggleLanguage(_ sender: NSSwitch) { let code = languages[sender.tag].code; var hidden = Settings.hidden; if sender.state == .on { hidden.remove(code) } else { hidden.insert(code) }; Settings.hidden = hidden; previewCode = code; preview.code = code; app?.refresh(animated: true) }
+    @objc private func colorChanged(_ sender: NSColorWell) { let code = languages[sender.tag].code; Palette.setColor(sender.color, for: code); resets[sender.tag].isEnabled = Palette.hasCustomColor(for: code); previewCode = code; preview.code = code; app?.refresh(animated: true) }
+    @objc private func resetColor(_ sender: NSButton) { let code = languages[sender.tag].code; Palette.setColor(nil, for: code); wells[sender.tag].color = Palette.color(for: code); sender.isEnabled = false; previewCode = code; preview.code = code; app?.refresh(animated: true) }
     @objc private func showShortcuts() { }
-
     @objc private func showSettings() { settingsWindow.show() }
-
     @objc private func toggleSpotlight() { presenter.setSpotlight(!presenter.spotlight) }
     @objc private func toggleZoom() { presenter.setZoom(!presenter.zoom) }
     @objc private func toggleDrawing() { presenter.setDrawing(!presenter.drawing) }
-    @objc private func openScreenRecordingSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
-        }
-    }
+    @objc private func openScreenRecordingSettings() { if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) } }
 
     // MARK: Menu
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "character.cursor.ibeam", accessibilityDescription: "CursorLingo")
-            button.imagePosition = .imageLeading
-            button.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
-        }
-        let menu = NSMenu()
-        menu.delegate = self
-        statusItem.menu = menu
+        if let button = statusItem.button { button.image = NSImage(systemSymbolName: "character.cursor.ibeam", accessibilityDescription: "CursorLingo"); button.imagePosition = .imageLeading; button.font = .monospacedSystemFont(ofSize: 11, weight: .semibold) }
+        let menu = NSMenu(); menu.delegate = self; statusItem.menu = menu
     }
-
-    /// The menu is rebuilt lazily each time it opens, so nothing menu-related lives in memory between uses.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let code = InputSource.currentCode()
-
-        let header = NSMenuItem(title: tr("Current input: \(code)", "ภาษาที่ใช้อยู่: \(code)"), action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-
-        menu.addItem(.separator())
-        menu.addItem(presentationMenu())
+        let header = NSMenuItem(title: tr("Current input: \(code)", "ภาษาที่ใช้อยู่: \(code)"), action: nil, keyEquivalent: ""); header.isEnabled = false; menu.addItem(header)
+        menu.addItem(.separator()); menu.addItem(presentationMenu())
         menu.addItem(item(tr("Convert Thai ↔ Arabic Digits", "แปลงเลขไทย ↔ อารบิก"), #selector(convertSelectedDigits)))
-        menu.addItem(submenu(tr("Fix Wrong Language (EN ⇄ TH): ", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): ") + Settings.fixMode.title,
-                             FixMode.allCases.map { ($0.rawValue, $0.title) }, selected: Settings.fixMode.rawValue,
-                             #selector(pickFixMode)))
+        menu.addItem(submenu(tr("Fix Wrong Language (EN ⇄ TH): ", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): ") + Settings.fixMode.title, FixMode.allCases.map { ($0.rawValue, $0.title) }, selected: Settings.fixMode.rawValue, #selector(pickFixMode)))
         if Settings.fixMode != .off {
-            let status = autoFix.status
-            let line = NSMenuItem(title: "    " + status.text, action: nil, keyEquivalent: "")
-            line.isEnabled = false
-            menu.addItem(line)
-            if status.problem == .permission {
-                menu.addItem(item("    " + tr("Open Privacy Settings…", "เปิด Privacy & Security…"), #selector(openPrivacySettings)))
-            }
-            if status.problem == .notRunning {
-                menu.addItem(item("    " + tr("Relaunch CursorLingo", "เปิด CursorLingo ใหม่"), #selector(relaunch)))
-            }
+            let status = autoFix.status; let line = NSMenuItem(title: "    " + status.text, action: nil, keyEquivalent: ""); line.isEnabled = false; menu.addItem(line)
+            if status.problem == .permission { menu.addItem(item("    " + tr("Open Privacy Settings…", "เปิด Privacy & Security…"), #selector(openPrivacySettings))) }
+            if status.problem == .notRunning { menu.addItem(item("    " + tr("Relaunch CursorLingo", "เปิด CursorLingo ใหม่"), #selector(relaunch))) }
         }
-        menu.addItem(.separator())
-        menu.addItem(item(tr("Settings…", "ตั้งค่า…"), #selector(showSettings), key: ","))
-        menu.addItem(item(tr("Quit CursorLingo", "ปิด CursorLingo"), #selector(quit), key: "q"))
+        menu.addItem(.separator()); menu.addItem(item(tr("Settings…", "ตั้งค่า…"), #selector(showSettings), key: ",")); menu.addItem(item(tr("Quit CursorLingo", "ปิด CursorLingo"), #selector(quit), key: "q"))
     }
-
-    private func item(_ title: String, _ action: Selector, on: Bool = false, key: String = "") -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        item.target = self
-        item.state = on ? .on : .off
-        return item
-    }
-
-    /// `options` are (stored value, title shown) pairs.
+    private func item(_ title: String, _ action: Selector, on: Bool = false, key: String = "") -> NSMenuItem { let i = NSMenuItem(title: title, action: action, keyEquivalent: key); i.target = self; i.state = on ? .on : .off; return i }
     private func submenu(_ title: String, _ options: [(String, String)], selected: String, _ action: Selector) -> NSMenuItem {
-        let sub = NSMenu()
-        for (value, label) in options {
-            let item = item(label, action, on: value == selected)
-            item.representedObject = value
-            sub.addItem(item)
-        }
-        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        parent.submenu = sub
-        return parent
+        let sub = NSMenu(); for (value, label) in options { let i = item(label, action, on: value == selected); i.representedObject = value; sub.addItem(i) }
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: ""); parent.submenu = sub; return parent
     }
-
     @objc private func convertSelectedDigits() { autoFix.convertDigitsInSelection() }
-
-    @objc func pickUILanguage(_ sender: NSMenuItem) {
-        Settings.uiLanguage = UILanguage(rawValue: sender.representedObject as? String ?? "") ?? .system
-    }
-
-    @objc func pickMode(_ sender: NSMenuItem) {
-        Settings.mode = DisplayMode(rawValue: sender.representedObject as? String ?? "") ?? .always
-        refresh(animated: Settings.mode == .onSwitch)
-    }
-
-    @objc func pickStyle(_ sender: NSMenuItem) {
-        Settings.style = BadgeStyle(rawValue: sender.representedObject as? String ?? "") ?? .color
-        refresh(animated: true)
-    }
-
-    @objc func pickSize(_ sender: NSMenuItem) {
-        Settings.size = BadgeSize(rawValue: sender.representedObject as? String ?? "") ?? .medium
-        refresh(animated: true)
-    }
-
-    @objc func pickFixMode(_ sender: NSMenuItem) {
-        let mode = FixMode(rawValue: sender.representedObject as? String ?? "") ?? .off
-        guard mode != .off else {
-            Settings.autoFix = false
-            autoFixRetry?.invalidate()
-            autoFix.stop()
-            return
-        }
-        Settings.fixAsYouType = mode == .automatic
-        autoFix.fixAsYouType = Settings.fixAsYouType
+    @objc func pickUILanguage(_ s: NSMenuItem) { Settings.uiLanguage = UILanguage(rawValue: s.representedObject as? String ?? "") ?? .system }
+    @objc func pickMode(_ s: NSMenuItem) { Settings.mode = DisplayMode(rawValue: s.representedObject as? String ?? "") ?? .always; refresh(animated: Settings.mode == .onSwitch) }
+    @objc func pickStyle(_ s: NSMenuItem) { Settings.style = BadgeStyle(rawValue: s.representedObject as? String ?? "") ?? .color; refresh(animated: true) }
+    @objc func pickSize(_ s: NSMenuItem) { Settings.size = BadgeSize(rawValue: s.representedObject as? String ?? "") ?? .medium; refresh(animated: true) }
+    @objc func pickFixMode(_ s: NSMenuItem) {
+        let mode = FixMode(rawValue: s.representedObject as? String ?? "") ?? .off
+        guard mode != .off else { Settings.autoFix = false; autoFixRetry?.invalidate(); autoFix.stop(); return }
+        Settings.fixAsYouType = mode == .automatic; autoFix.fixAsYouType = Settings.fixAsYouType
         if !Settings.autoFix { enableAutoFix() }
     }
-
     private func enableAutoFix() {
-        Settings.autoFix = true
-        startAutoFix()
-        if autoFix.isRunning { return }
-        autoFixRetry?.invalidate()
-        autoFixRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
-            guard let self, Settings.autoFix else { timer.invalidate(); return }
-            if self.autoFix.start() { timer.invalidate(); self.autoFixRetry = nil }
-        }
+        Settings.autoFix = true; startAutoFix(); if autoFix.isRunning { return }
+        autoFixRetry?.invalidate(); autoFixRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in guard let self, Settings.autoFix else { timer.invalidate(); return }; if self.autoFix.start() { timer.invalidate(); self.autoFixRetry = nil } }
     }
-
     private func startAutoFix() {
         guard Settings.autoFix, !autoFix.start() else { return }
-        autoFixRetry?.invalidate()
-        autoFixRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
-            guard let self, Settings.autoFix else { timer.invalidate(); return }
-            if self.autoFix.start() { timer.invalidate(); self.autoFixRetry = nil }
-        }
+        autoFixRetry?.invalidate(); autoFixRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in guard let self, Settings.autoFix else { timer.invalidate(); return }; if self.autoFix.start() { timer.invalidate(); self.autoFixRetry = nil } }
     }
-
-    @objc private func openPrivacySettings() {
-        let pane = CGPreflightListenEventAccess() ? "Privacy_Accessibility" : "Privacy_ListenEvent"
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    @objc func relaunch() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
-        try? process.run()
-        NSApp.terminate(nil)
-    }
-
-    @objc func toggleCodeEditorsManual() {
-        Settings.codeEditorsManual.toggle()
-        autoFix.codeEditorsManual = Settings.codeEditorsManual
-    }
-
+    @objc private func openPrivacySettings() { let pane = CGPreflightListenEventAccess() ? "Privacy_Accessibility" : "Privacy_ListenEvent"; if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") { NSWorkspace.shared.open(url) } }
+    @objc func relaunch() { let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/sh"); process.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]; try? process.run(); NSApp.terminate(nil) }
+    @objc func toggleCodeEditorsManual() { Settings.codeEditorsManual.toggle(); autoFix.codeEditorsManual = Settings.codeEditorsManual }
     @objc func forgetLearned() { autoFix.forgetRules() }
-
-    /// The tools' shortcuts (⌃⌥H, ⌃⌥Z, ⌃⌥D unless changed) work from anywhere. Returns the tools whose shortcut
-    /// another app already has.
-    @discardableResult
-    func registerShortcuts() -> [PresentTool] {
-        presentationKeys = []
-        var failed: [PresentTool] = []
-        for tool in PresentTool.allCases {
-            guard let shortcut = Settings.shortcut(tool) else { continue }
-            let key = HotKey(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers) { [weak self] in self?.toggle(tool) }
-            if key.registered { presentationKeys.append(key) } else { failed.append(tool) }
-        }
-        let digitKey = HotKey(keyCode: kVK_ANSI_R, modifiers: controlKey | optionKey) { [weak self] in
-            self?.autoFix.convertDigitsInSelection()
-        }
+    @discardableResult func registerShortcuts() -> [PresentTool] {
+        presentationKeys = []; var failed: [PresentTool] = []
+        for tool in PresentTool.allCases { guard let s = Settings.shortcut(tool) else { continue }; let key = HotKey(keyCode: s.keyCode, modifiers: s.modifiers) { [weak self] in self?.toggle(tool) }; if key.registered { presentationKeys.append(key) } else { failed.append(tool) } }
+        let digitKey = HotKey(keyCode: kVK_ANSI_R, modifiers: controlKey | optionKey) { [weak self] in self?.autoFix.convertDigitsInSelection() }
         if digitKey.registered { presentationKeys.append(digitKey) }
         return failed
     }
-
-    private func toggle(_ tool: PresentTool) {
-        switch tool {
-        case .spotlight: toggleSpotlight()
-        case .zoom: toggleZoom()
-        case .draw: toggleDrawing()
-        }
-    }
-
-    /// While a shortcut box in Settings listens, the keys must reach it instead of toggling a tool.
-    func pauseShortcuts(_ paused: Bool) {
-        if paused { presentationKeys = [] } else { registerShortcuts() }
-    }
-
+    private func toggle(_ tool: PresentTool) { switch tool { case .spotlight: toggleSpotlight(); case .zoom: toggleZoom(); case .draw: toggleDrawing() } }
+    func pauseShortcuts(_ paused: Bool) { if paused { presentationKeys = [] } else { registerShortcuts() } }
     @objc private func showShortcuts() { settingsWindow.show(.presentation) }
     @objc private func showSettings() { settingsWindow.show() }
     @objc func toggleSpotlight() { presenter.setSpotlight(!presenter.spotlight) }
     @objc func toggleZoom() { presenter.setZoom(!presenter.zoom) }
     @objc func toggleDrawing() { presenter.setDrawing(!presenter.drawing) }
-    @objc func openScreenRecordingSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
-        }
-    }
+    @objc func openScreenRecordingSettings() { if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) } }
 }
