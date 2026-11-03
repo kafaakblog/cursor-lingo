@@ -1679,6 +1679,7 @@ static void CheckSelectionCopy() {
         // Reading delayed-rendered text may publish formats and advance the sequence.
         g_clip.seq = GetClipboardSequenceNumber();
     }
+    if (g_clip.numerals && !g_set.numeralEnabled) { RestoreClipboard(); return; }
     // Too long, or an editor that copies the whole line ("...\r\n") when nothing is selected: leave it.
     int target = (n == 0 || n > 2000 || in[n - 1] == u'\n') ? -1 :
         g_clip.numerals ? (lf::convertNumerals(in, n, out) ? 0 : -1) : lf::convertText(in, n, out);

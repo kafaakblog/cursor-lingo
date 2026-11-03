@@ -669,7 +669,7 @@ final class AutoFix {
     func requestSelection(numerals: Bool) {
         guard !numerals || Settings.numeralEnabled else { return }
         guard !selectionBusy, !IsSecureEventInputEnabled() else { return }
-        guard CGPreflightPostEventAccess() else { AutoFix.requestPermission(); return }
+        guard CGPreflightPostEventAccess() else { _ = CGRequestPostEventAccess(); return }
         selectionBusy = true
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         func waitForRelease(_ attempts: Int) {
@@ -717,6 +717,7 @@ final class AutoFix {
 
     /// Types (or, for several lines, pastes) the other layout's reading of `text` over the selection.
     private func replaceSelection(_ text: String, numerals: Bool = false) {
+        guard !numerals || Settings.numeralEnabled else { return }
         let units = Array(text.utf16)
         guard !units.isEmpty, units.count <= 2000 else { return }
         var out = [UInt16](repeating: 0, count: units.count)
@@ -2847,7 +2848,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startAutoFix()
         registerShortcuts()
     }
-    @objc func allowNumeralAccess() { AutoFix.requestPermission(); startAutoFix() }
+    @objc func allowNumeralAccess() {
+        if Settings.numeralMode == 1 { AutoFix.requestPermission() }
+        else if !CGPreflightPostEventAccess() { _ = CGRequestPostEventAccess() }
+        startAutoFix()
+    }
     @objc func convertNumerals() { autoFix.requestSelection(numerals: true) }
     @objc func convertSelectedLanguage() { autoFix.requestSelection(numerals: false) }
     @objc private func showShortcuts() { settingsWindow.show(.presentation) }
