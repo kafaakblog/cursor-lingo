@@ -1,6 +1,8 @@
 name: Apply Thai digit patch and build macOS
 
 on:
+  push:
+    branches: [feature/thai-digits-macos-ui]
   workflow_dispatch:
 
 permissions:
@@ -15,6 +17,11 @@ jobs:
         with:
           ref: feature/thai-digits-macos-ui
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Restore pristine macOS source
+        run: |
+          git fetch origin main
+          git checkout 97ca936555ebcec7be8adafe2f80256f259e0910 -- macos/CursorLingo.swift
       - name: Apply patch and verify source
         run: |
           python3 scripts/patch_cursor_lingo.py
