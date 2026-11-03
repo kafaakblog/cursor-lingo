@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
             if (!shouldConvert(k.data(), (int)k.size(), LANG_EN, true)) { printf("FAIL: Thai word not fixed\n"); failures++; }
         }
     }
-    // English typed on the Thai layout -> convert.
+    // English on Thai layout -> convert.
     expect("this on Thai layout", u"ะ้รห", LANG_TH, true);
     expect("hello on Thai layout", u"้ำสสน", LANG_TH, true);
 
@@ -165,11 +165,18 @@ int main(int argc, char** argv) {
         std::u16string a(n, 0), b(n, 0);
         int to = convertText(in, n, &a[0]);
         if (to != LANG_EN || a.substr(0, 19) != u"this is a new model") { printf("FAIL: selection TH->EN\n"); failures++; }
-        // Mixed text follows the dominant script: here it is now mostly Latin, so it goes back to Thai.
         int back = convertText(a.c_str(), n, &b[0]);
         if (back != LANG_TH || b.substr(0, 19) != std::u16string(in).substr(0, 19)) { printf("FAIL: selection round trip\n"); failures++; }
-        char16_t z[4];
-        if (convertText(u"123", 3, z) != -1) { printf("FAIL: digits only\n"); failures++; }
+        char16_t z[4]; if (convertText(u"123", 3, z) != -1) { printf("FAIL: digits only\n"); failures++; }
+    }
+
+    // UTF-8 Thai/Arabic digit toggle: mappings, mixed text, and round-trip.
+    {
+        const std::string ascii = "0123456789";
+        const std::string thai = u8"๐๑๒๓๔๕๖๗๘๙";
+        if (toggleDigits(ascii) != thai || toggleDigits(thai) != ascii || toggleDigits(toggleDigits(ascii)) != ascii) { printf("FAIL: digit mapping / round trip\n"); failures++; }
+        if (toggleDigits(u8"Order 42: บ้าน ๙๙ 🙂") != u8"Order ๔๒: บ้าน 99 🙂") { printf("FAIL: mixed digit text\n"); failures++; }
+        if (toggleDigits(u8"ปี ๒๕๖๙") != u8"ปี 2569") { printf("FAIL: Thai text digits\n"); failures++; }
     }
 
     int cases = 0;
