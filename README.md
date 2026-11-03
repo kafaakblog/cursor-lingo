@@ -276,7 +276,7 @@ Supports toggling between Thai digits (๐-๙) and Arabic digits (0-9).
 
 Select text in an editable field and double-tap **Alt** on Windows or **Command (⌘)** on macOS. The tray/menu-bar menu also offers separate commands for converting the selected language and converting selected numerals.
 
-Under **Settings → Fix Wrong Language → Convert Thai / Arabic numerals**, choose double-tap, a custom shortcut, or menu only. This works independently of automatic language fixing. The default numeral gesture is double Alt / Command; each tap must be shorter than 350 ms and the releases less than 450 ms apart. Chords such as Alt+Tab and Command+C cancel the gesture. macOS requires Input Monitoring for double Command and Accessibility to replace text; use **Allow Keyboard Access…** in Settings.
+Under **Settings → Numerals**, choose double-tap, a custom shortcut, or menu only. This works independently of automatic language fixing. The default numeral gesture is double Alt / Command; each tap must be shorter than 350 ms and the releases less than 450 ms apart. Chords such as Alt+Tab and Command+C cancel the gesture. macOS requires Input Monitoring for double Command and Accessibility to replace text; use **Allow Keyboard Access…** in Settings.
 
 Digits are converted by value, never by keyboard position: `001,234.50` ⇄ `๐๐๑,๒๓๔.๕๐`. Mixed selections toggle each digit (`12 / ๓๔` → `๑๒ / 34`). Letters, punctuation, whitespace, and the current input language stay unchanged. Select the result again to reverse it, or use the editor's Undo.
 

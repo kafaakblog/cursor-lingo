@@ -1424,7 +1424,6 @@ struct Shortcut: Equatable {
 
 /// A box that records a shortcut: click it, then press the keys. Delete clears it, Esc gives up.
 final class ShortcutField: NSView {
-    var isEnabled = true { didSet { needsDisplay = true } }
     var shortcut: Shortcut? { didSet { needsDisplay = true } }
     /// The user picked a new shortcut, or cleared it (nil).
     var onRecord: ((Shortcut?) -> Void)?
@@ -1437,11 +1436,10 @@ final class ShortcutField: NSView {
         }
     }
 
-    override var acceptsFirstResponder: Bool { isEnabled }
+    override var acceptsFirstResponder: Bool { true }
     override var intrinsicContentSize: NSSize { NSSize(width: 150, height: 24) }
 
     override func mouseDown(with event: NSEvent) {
-        guard isEnabled else { return }
         window?.makeFirstResponder(self)
         listening = true
     }
@@ -1480,7 +1478,7 @@ final class ShortcutField: NSView {
         let text = listening ? tr("Type shortcut…", "กดคีย์ที่ต้องการ…") : shortcut?.display ?? tr("None", "ไม่มี")
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13),
-            .foregroundColor: !isEnabled || listening || shortcut == nil ? NSColor.secondaryLabelColor : NSColor.labelColor,
+            .foregroundColor: listening || shortcut == nil ? NSColor.secondaryLabelColor : NSColor.labelColor,
         ]
         let size = text.size(withAttributes: attrs)
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attrs)
@@ -1570,7 +1568,7 @@ enum PromptPay {
 }
 
 final class SettingsWindow: NSObject, NSWindowDelegate {
-    enum Tab: Int { case badge, fix, presentation, general }
+    enum Tab: Int { case badge, fix, presentation, general, numerals }
 
     weak var app: AppDelegate?
     private var window: NSWindow?
@@ -1614,7 +1612,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 
     private func makeWindow() {
         tabs.tabStyle = .toolbar
-        let symbols = ["character.cursor.ibeam", "keyboard", "cursorarrow.rays", "gearshape"]
+        let symbols = ["character.cursor.ibeam", "keyboard", "cursorarrow.rays", "gearshape", "number"]
         for symbol in symbols {
             let page = NSViewController()
             page.view = NSView()  // stays for good; build() swaps what is inside, which the tab view shows at once
@@ -1635,8 +1633,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private func build() {
         window?.makeFirstResponder(nil)  // a shortcut box still listening lets go first
         let titles = [tr("Badge", "ป้ายภาษา"), tr("Fix Wrong Language", "แก้คำผิดภาษา"), tr("Presentation", "นำเสนอ"),
-                      tr("General", "ทั่วไป")]
-        let views = [badgeTab(), fixTab(), presentationTab(), generalTab()]
+                      tr("General", "ทั่วไป"), tr("Numerals", "ตัวเลข")]
+        let views = [badgeTab(), fixTab(), presentationTab(), generalTab(), numeralTab()]
         for (i, item) in tabs.tabViewItems.enumerated() {
             item.label = titles[i]
             item.viewController?.title = titles[i]  // the tab controller makes the page's title the window's title
@@ -1733,6 +1731,30 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         return tab([top, heading, list])
     }
 
+    private func numeralTab() -> NSView {
+        guard let app else { return NSView() }
+        let numeralMode = popup([("0", tr("Menu only", "ใช้เมนูเท่านั้น")),
+                                 ("1", tr("Double Command", "กด Command 2 ครั้ง")),
+                                 ("2", tr("Custom shortcut", "คีย์ลัดที่กำหนดเอง"))], String(Settings.numeralMode), #selector(numeralModeChanged(_:)))
+        numeralMode.target = self
+        numeralMode.action = #selector(numeralModeChanged(_:))
+        let numeralKey = ShortcutField()
+        numeralKey.shortcut = Settings.shortcut(.numerals)
+        numeralKey.onRecord = { [weak self] s in self?.setShortcut(.numerals, s) }
+        numeralKey.onListening = { [weak app] listening in app?.pauseShortcuts(listening) }
+        numeralKey.widthAnchor.constraint(equalToConstant: 104).isActive = true
+        shortcutFields[.numerals] = numeralKey
+        numeralShortcutStatus.textColor = .systemRed
+        let views: [NSView] = [header(tr("Convert Thai / Arabic Numerals", "สลับเลขไทย / อารบิก")),
+            caption(tr("Select text, then double-tap Command or use a custom shortcut. Only digits change. Delete clears the shortcut.",
+                       "เลือกข้อความแล้วกด Command 2 ครั้ง หรือใช้คีย์ลัดที่ตั้งไว้ เปลี่ยนเฉพาะตัวเลข กด Delete ในช่องคีย์ลัดเพื่อล้าง")),
+            line(numeralMode, numeralKey), numeralShortcutStatus,
+            button(tr("Allow Keyboard Access…", "อนุญาตการเข้าถึงแป้นพิมพ์…"), #selector(AppDelegate.allowNumeralAccess), app),
+            caption(tr("Mixed digits toggle individually: 12 / ๓๔ becomes ๑๒ / 34. Your input language stays unchanged.",
+                       "เลขปนกันจะสลับทีละตัว: 12 / ๓๔ เป็น ๑๒ / 34 โดยไม่เปลี่ยนภาษาแป้นพิมพ์"))]
+        return tab(views)
+    }
+
     private func fixTab() -> NSView {
         guard let app else { return NSView() }
         let mode = Settings.fixMode
@@ -1743,25 +1765,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             (.automatic, tr("Words typed in the wrong language are fixed as you type. If a fix is wrong, double Shift puts it back.",
                             "แก้คำที่พิมพ์ผิดภาษาให้เองระหว่างพิมพ์ ถ้าแก้ไม่ตรงใจ กด Shift 2 ครั้งเพื่อย้อนคืน")),
         ]
-        let numeralMode = popup([("0", tr("Menu only", "ใช้เมนูเท่านั้น")),
-                                 ("1", tr("Double Command", "กด Command 2 ครั้ง")),
-                                 ("2", tr("Custom shortcut", "คีย์ลัดที่กำหนดเอง"))], String(Settings.numeralMode), #selector(numeralModeChanged(_:)))
-        numeralMode.target = self
-        numeralMode.action = #selector(numeralModeChanged(_:))
-        let numeralKey = ShortcutField()
-        numeralKey.shortcut = Settings.shortcut(.numerals)
-        numeralKey.onRecord = { [weak self] s in self?.setShortcut(.numerals, s) }
-        numeralKey.onListening = { [weak app] listening in app?.pauseShortcuts(listening) }
-        numeralKey.isEnabled = Settings.numeralMode == 2
-        numeralKey.widthAnchor.constraint(equalToConstant: 104).isActive = true
-        shortcutFields[.numerals] = numeralKey
-        numeralShortcutStatus.textColor = .systemRed
-        var views: [NSView] = [header(tr("Convert Thai / Arabic Numerals", "สลับเลขไทย / อารบิก")),
-            caption(tr("Select text, then double-tap Command or use a custom shortcut. Only digits change. Delete clears the shortcut.",
-                       "เลือกข้อความแล้วกด Command 2 ครั้ง หรือใช้คีย์ลัดที่ตั้งไว้ เปลี่ยนเฉพาะตัวเลข กด Delete ในช่องคีย์ลัดเพื่อล้าง")),
-            line(numeralMode, numeralKey), numeralShortcutStatus,
-            button(tr("Allow Keyboard Access…", "อนุญาตการเข้าถึงแป้นพิมพ์…"), #selector(AppDelegate.allowNumeralAccess), app),
-            separator(), header(tr("Fix Wrong Language (EN ⇄ TH)", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH)"))]
+        var views: [NSView] = [header(tr("Fix Wrong Language (EN ⇄ TH)", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH)"))]
         for (i, (m, detail)) in modes.enumerated() {
             let radio = NSButton(radioButtonWithTitle: m.title, target: self, action: #selector(fixModeChanged(_:)))
             radio.tag = i
@@ -2071,7 +2075,15 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     }
 
     @objc private func numeralModeChanged(_ sender: NSPopUpButton) {
+        let previous = Settings.numeralMode
         Settings.numeralMode = Int(sender.selectedItem?.representedObject as? String ?? "0") ?? 0
+        if Settings.numeralMode == 2, app?.registerShortcuts().contains(.numerals) == true {
+            Settings.numeralMode = previous
+            app?.registerShortcuts()
+            sender.selectItem(at: previous)
+            shortcutFailed(tr("The saved shortcut is in use. Clear it or choose another.", "คีย์ลัดเดิมถูกใช้อยู่ กรุณาล้างหรือตั้งคีย์ใหม่"))
+            return
+        }
         app?.updateNumeralShortcuts()
         reload()
     }
@@ -2086,15 +2098,19 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             }
         }
         let old = Settings.shortcut(tool)
+        let oldMode = Settings.numeralMode
+        if tool == .numerals { Settings.numeralMode = 2 }
         Settings.setShortcut(s, for: tool)
         let failed = app?.registerShortcuts() ?? []
         if let s, failed.contains(tool) {
             Settings.setShortcut(old, for: tool)
+            Settings.numeralMode = oldMode
             _ = app?.registerShortcuts()
             return shortcutFailed(tr("Another app already uses \(s.display).", "มีแอปอื่นใช้ \(s.display) อยู่แล้ว"))
         }
         showShortcutStatus("")
         for (tool, field) in shortcutFields { field.shortcut = Settings.shortcut(tool) }
+        if tool == .numerals { app?.updateNumeralShortcuts(); reload() }
     }
 
     private func showShortcutStatus(_ message: String) {

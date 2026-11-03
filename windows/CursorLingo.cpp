@@ -83,7 +83,7 @@ struct Settings {
 } g_set;
 
 // The Settings window (see below) shows the open tab again when something it shows changes.
-enum { TAB_BADGE, TAB_FIX, TAB_PRESENT, TAB_GENERAL, TAB_COUNT };
+enum { TAB_BADGE, TAB_FIX, TAB_PRESENT, TAB_GENERAL, TAB_NUMERALS, TAB_COUNT };
 static void SettingsReload(int tab);
 
 // ---------------------------------------------------------------------------
@@ -1874,8 +1874,8 @@ enum {
     CTL_COLOR_BASE = 2400, CTL_DEFAULT_BASE = 2500, CTL_SHOW_BASE = 2600, kMaxRows = 64,
 };
 #define WM_APP_RELOAD (WM_APP + 20)
-static const wchar_t* kTabNames[2][4] = {{L"Badge", L"Fix Wrong Language", L"Presentation", L"General"},
-                                         {L"ป้ายภาษา", L"แก้คำผิดภาษา", L"นำเสนอ", L"ทั่วไป"}};
+static const wchar_t* kTabNames[2][5] = {{L"Badge", L"Fix Wrong Language", L"Presentation", L"General", L"Numerals"},
+                                         {L"ป้ายภาษา", L"แก้คำผิดภาษา", L"นำเสนอ", L"ทั่วไป", L"ตัวเลข"}};
 
 // PromptPay, Thailand's bank transfer, for donations. The QR code is a static PromptPay QR (EMVCo) for this number
 // with no amount, so the payer types it in their banking app. Windows has no QR encoder, so the modules are kept
@@ -2128,7 +2128,7 @@ static void SetFixMode(int pick) {
 
 // The tools' shortcuts are released while the Presentation tab is in front, so pressing one reaches its box.
 static void UpdateKeyPause() {
-    bool pause = g_setWnd && g_setActive && (g_setTab == TAB_PRESENT || g_setTab == TAB_FIX);
+    bool pause = g_setWnd && g_setActive && (g_setTab == TAB_PRESENT || g_setTab == TAB_NUMERALS);
     if (pause == g_keysPaused) return;
     g_keysPaused = pause;
     g_altTap.reset();
@@ -2281,9 +2281,7 @@ static void BuildBadgeTab(Page& p) {
     }
 }
 
-static void BuildFixTab(Page& p) {
-    const int th = UiThai();
-    const int mode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
+static void BuildNumeralTab(Page& p) {
     p.Header(TR(L"Convert Thai / Arabic numerals", L"สลับเลขไทย / อารบิก"));
     p.Caption(TR(L"Select text, then double-tap Alt or use your custom shortcut. Only digits change. Backspace clears the custom shortcut.",
                  L"เลือกข้อความแล้วกด Alt 2 ครั้ง หรือใช้คีย์ลัดที่ตั้งไว้ เปลี่ยนเฉพาะตัวเลข กด Backspace ในช่องคีย์ลัดเพื่อล้าง"));
@@ -2294,11 +2292,17 @@ static void BuildFixTab(Page& p) {
     HWND key = p.Add(HOTKEY_CLASSW, L"", WS_TABSTOP, 350, p.y, 150, 28, CTL_KEY_BASE + 3);
     SendMessageW(key, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
     SendMessageW(key, HKM_SETHOTKEY, g_set.keyNumerals, 0);
-    EnableWindow(key, g_set.numeralMode == 2);
     p.y += 32;
     p.Add(L"STATIC", g_keyStatus, SS_NOPREFIX, Page::L, p.y, Page::W, 28, CTL_STATUS);
     p.y += 28;
     p.Separator();
+    p.Caption(TR(L"For mixed selections, each digit is toggled: 12 / ๓๔ becomes ๑๒ / 34. Your input language stays unchanged.",
+                 L"หากมีเลขปนกัน จะสลับทีละตัว: 12 / ๓๔ เป็น ๑๒ / 34 โดยไม่เปลี่ยนภาษาแป้นพิมพ์"));
+}
+
+static void BuildFixTab(Page& p) {
+    const int th = UiThai();
+    const int mode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
     p.Header(TR(L"Fix Wrong Language (EN \u21C4 TH)", L"แก้คำที่พิมพ์ผิดภาษา (EN \u21C4 TH)"));
     const wchar_t* details[3] = {
         TR(L"Language fixing is off. Numeral shortcuts are configured separately.", L"ปิดการแก้คำผิดภาษา ส่วนคีย์ลัดตัวเลขตั้งค่าแยกได้"),
@@ -2516,6 +2520,7 @@ static void BuildPage() {
     switch (g_setTab) {
         case TAB_BADGE: BuildBadgeTab(p); break;
         case TAB_FIX: BuildFixTab(p); break;
+        case TAB_NUMERALS: BuildNumeralTab(p); break;
         case TAB_PRESENT: BuildPresentTab(p); ShowSliderValues(); break;
         default: BuildGeneralTab(p); break;
     }
@@ -2892,14 +2897,21 @@ static void ApplyKey(int i, HWND box) {
             swprintf(g_keyStatus, 128, TR(L"%ls is already used for %ls.", L"%ls ใช้กับ%lsอยู่แล้ว"), text, kToolNames[UiThai()][j]);
     if (!g_keyStatus[0]) {
         const DWORD old = *ToolKey(i);
+        const DWORD oldMode = g_set.numeralMode;
+        if (i == 3) g_set.numeralMode = 2;
         *ToolKey(i) = k;
         const int failed = RegisterToolKeys();
         if (g_keysPaused) UnregisterToolKeys();
         if (failed & (1 << i)) {
             *ToolKey(i) = old;
+            g_set.numeralMode = oldMode;
             if (!g_keysPaused) RegisterToolKeys();
             swprintf(g_keyStatus, 128, TR(L"Another app already uses %ls.", L"มีแอปอื่นใช้ %ls อยู่แล้ว"), text);
         } else {
+            if (i == 3) {
+                SetAutoFix(g_set.autoFix != 0);
+                SendDlgItemMessageW(g_setPage, CTL_NUMERAL_MODE, CB_SETCURSEL, 2, 0);
+            }
             SaveSettings();
         }
     }
@@ -2948,12 +2960,23 @@ static void PageCommand(int id, int code, HWND ctl) {
         SetFixMode(id - CTL_FIX_BASE);
         SettingsReload(TAB_FIX);  // code editors only apply to Automatic
     } else if (id == CTL_NUMERAL_MODE && code == CBN_SELCHANGE) {
+        DWORD previous = g_set.numeralMode;
         g_set.numeralMode = (DWORD)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
-        SetAutoFix(g_set.autoFix != 0);
-        RegisterToolKeys();
+        int failed = RegisterToolKeys();
+        if (g_set.numeralMode == 2 && (failed & (1 << 3))) {
+            g_set.numeralMode = previous;
+            RegisterToolKeys();
+            SendMessageW(ctl, CB_SETCURSEL, previous, 0);
+            wcscpy(g_keyStatus, TR(L"The saved shortcut is in use. Clear it or choose another.", L"คีย์ลัดเดิมถูกใช้อยู่ กรุณาล้างหรือตั้งคีย์ใหม่"));
+            SetDlgItemTextW(g_setPage, CTL_STATUS, g_keyStatus);
+            if (g_keysPaused) UnregisterToolKeys();
+            return;
+        }
         if (g_keysPaused) UnregisterToolKeys();
+        SetAutoFix(g_set.autoFix != 0);
+        g_keyStatus[0] = 0;
         SaveSettings();
-        SettingsReload(TAB_FIX);
+        SettingsReload(TAB_NUMERALS);
     } else if (id == CTL_EDITORS) {
         g_set.codeEditorsManual = checked;
         SaveSettings();
