@@ -1647,8 +1647,9 @@ static void CheckSelectionCopy() {
     bool pasted = false;
     if (EmptyClipboard())
         pasted = SetClipboardData(CF_UNICODETEXT, replacement) != nullptr;
-    g_clip.seq = GetClipboardSequenceNumber();
     CloseClipboard();
+    // Closing publishes synthesized text formats and may advance the sequence again.
+    g_clip.seq = GetClipboardSequenceNumber();
     if (!pasted) { GlobalFree(replacement); RestoreClipboard(); return; }
     SendChord('V');
     SetTimer(g_host, TIMER_RESTORE, 300, nullptr);  // after the app has read it
