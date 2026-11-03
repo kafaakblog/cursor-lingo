@@ -1,0 +1,38 @@
+name: Apply Thai digit patch and build macOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-build:
+    if: github.ref == 'refs/heads/feature/thai-digits-macos-ui'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/thai-digits-macos-ui
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply patch and verify source
+        run: |
+          python3 scripts/patch_cursor_lingo.py
+          test "$(wc -l < macos/CursorLingo.swift | tr -d ' ')" = 2804
+          ! grep -qi 'remainder of the app\|placeholder' macos/CursorLingo.swift
+      - name: Commit and push restored source
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add macos/CursorLingo.swift
+          git commit -m "Add Thai digit conversion to macOS app" || echo "No source changes to commit"
+          git push origin HEAD:feature/thai-digits-macos-ui
+      - name: Build macOS app
+        run: ./macos/build.sh
+      - name: Package app
+        run: cd build && ditto -c -k --keepParent CursorLingo.app CursorLingo-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CursorLingo-macOS-thai-digits
+          path: build/CursorLingo-macOS.zip
+          if-no-files-found: error
