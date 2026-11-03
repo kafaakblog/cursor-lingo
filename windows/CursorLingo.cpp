@@ -1558,6 +1558,7 @@ static void RestoreClipboard() {
     if (!g_clip.saved) return;
     if (GetClipboardSequenceNumber() != g_clip.seq) { FreeSavedClipboard(); return; }
     if (!OpenClipboardRetry()) return;
+    if (GetClipboardSequenceNumber() != g_clip.seq) { CloseClipboard(); FreeSavedClipboard(); return; }
     EmptyClipboard();
     for (int i = 0; i < g_clip.count; i++) SetClipboardData(g_clip.format[i], g_clip.data[i]);  // ownership passes on
     CloseClipboard();
@@ -1640,8 +1641,11 @@ static void CheckSelectionCopy() {
     d[n] = 0;
     GlobalUnlock(replacement);
     if (!OpenClipboardRetry()) { GlobalFree(replacement); RestoreClipboard(); return; }
+    if (GetClipboardSequenceNumber() != g_clip.seq) {
+        CloseClipboard(); GlobalFree(replacement); FreeSavedClipboard(); return;
+    }
     bool pasted = false;
-    if (GetClipboardSequenceNumber() == g_clip.seq && EmptyClipboard())
+    if (EmptyClipboard())
         pasted = SetClipboardData(CF_UNICODETEXT, replacement) != nullptr;
     g_clip.seq = GetClipboardSequenceNumber();
     CloseClipboard();

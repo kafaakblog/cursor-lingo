@@ -133,7 +133,7 @@ struct Settings {
         d.set(s.map { [$0.keyCode, $0.modifiers] } ?? [], forKey: "shortcut." + tool.rawValue)
     }
     static func resetShortcuts() {
-        for tool in PresentTool.allCases { d.removeObject(forKey: "shortcut." + tool.rawValue) }
+        for tool in PresentTool.allCases where tool != .numerals { d.removeObject(forKey: "shortcut." + tool.rawValue) }
     }
     /// Magnification of the presentation zoom lens.
     static var zoomLevel: Double {
@@ -695,8 +695,10 @@ final class AutoFix {
                 let before = pb.changeCount
                 self.post(keyCode: 8, flags: .maskCommand)  // ⌘C
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    let text = pb.changeCount != before ? pb.string(forType: .string) : nil
-                    restore()
+                    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                    let copied = pb.changeCount
+                    let text = copied != before ? pb.string(forType: .string) : nil
+                    if copied != before { restore(copied) }
                     // Editors copy the whole line ("...\n") when nothing is selected: never act on that.
                     if let text, !text.hasSuffix("\n"),
                        NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, !IsSecureEventInputEnabled() {
@@ -729,8 +731,9 @@ final class AutoFix {
                 let pb = NSPasteboard.general
                 pb.clearContents()
                 pb.setString(String(utf16CodeUnits: out, count: out.count), forType: .string)
+                let pasted = pb.changeCount
                 self.post(keyCode: 9, flags: .maskCommand)  // ⌘V
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { restore() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { restore(pasted) }
             }
         } else {
             for unit in out { post(keyCode: 0, unicode: unit) }  // the first character replaces the selection
@@ -744,12 +747,13 @@ final class AutoFix {
     }
 
     /// Runs `body` with a snapshot of the clipboard; `body` calls the closure it gets to put the snapshot back.
-    private func withClipboardSaved(_ body: (@escaping () -> Void) -> Void) {
+    private func withClipboardSaved(_ body: (@escaping (Int) -> Void) -> Void) {
         let pb = NSPasteboard.general
         let saved = (pb.pasteboardItems ?? []).map { item in
             item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
         }
-        body {
+        body { expected in
+            guard pb.changeCount == expected else { return }  // preserve anything the user copied meanwhile
             pb.clearContents()
             let items = saved.map { pairs -> NSPasteboardItem in
                 let item = NSPasteboardItem()
