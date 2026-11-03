@@ -4,8 +4,8 @@
 //   * The badge follows the mouse via a low-level mouse hook (event-driven, coalesced).
 //   * Rendering happens only when the language, style, size or monitor DPI changes.
 //   * The badge is a per-pixel-alpha layered window, so it is anti-aliased and click-through.
-//   * The active layout is read with GetKeyboardLayout(). A keyboard hook exists only while the optional
-//     "Fix wrong language" feature is switched on (off by default); it keeps nothing but the current
+//   * The active layout is read with GetKeyboardLayout(). A keyboard hook serves the double-Alt numeral
+//     shortcut and optional "Fix wrong language" feature (off by default); only language fixing keeps the current
 //     and last word in memory (plus the personal word list the user teaches it), and never touches the network.
 //   * Runs as a normal user: no administrator rights, no installer, no services, no registry. Settings are
 //     plain files in %APPDATA%\CursorLingo; "Start with Windows" is a shortcut in the user's Startup folder.
@@ -41,6 +41,8 @@
 
 #include "resource.h"
 #include "../core/layoutfix.h"
+#include "../core/numerals.h"
+#include "../core/badge_position.h"
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -75,12 +77,15 @@ struct Settings {
     DWORD spotRadius = 100;     // spotlight radius in points (40..300)
     DWORD zoomLevel = 20;       // zoom lens magnification, in tenths (15..80)
     DWORD keySpotlight = 0x648, keyZoom = 0x65A, keyDraw = 0x644;  // tool shortcuts (see RegisterToolKeys), Ctrl+Alt+H/Z/D
+    DWORD numeralEnabled = 1;
+    DWORD numeralMode = 2;     // 0 = menu only, 1 = double Alt, 2 = custom shortcut
+    DWORD keyNumerals = 0x2C0;      // user-defined chord, independent of language fixing
     DWORD badgeBorder = 1;      // the badge's thin border and shadow
     wchar_t hidden[256] = L"";  // comma separated codes, e.g. ",EN,JA,"
 } g_set;
 
 // The Settings window (see below) shows the open tab again when something it shows changes.
-enum { TAB_BADGE, TAB_FIX, TAB_PRESENT, TAB_GENERAL, TAB_COUNT };
+enum { TAB_BADGE, TAB_FIX, TAB_NUMERALS, TAB_PRESENT, TAB_GENERAL, TAB_COUNT };
 static void SettingsReload(int tab);
 
 // ---------------------------------------------------------------------------
@@ -113,6 +118,9 @@ static const SettingField kFields[] = {
     {L"ShortcutSpotlight", &g_set.keySpotlight, 0x648, 0x10000},
     {L"ShortcutZoom", &g_set.keyZoom, 0x65A, 0x10000},
     {L"ShortcutDraw", &g_set.keyDraw, 0x644, 0x10000},
+    {L"NumeralEnabled", &g_set.numeralEnabled, 1, 2},
+    {L"NumeralMode", &g_set.numeralMode, 2, 3},
+    {L"ShortcutNumerals", &g_set.keyNumerals, 0x2C0, 0x10000},
     {L"BadgeBorder", &g_set.badgeBorder, 1, 2},
 };
 
@@ -534,9 +542,9 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
 #define WM_APP_RIPPLE (WM_APP + 6)
 #define WM_APP_SPOT_SIZE (WM_APP + 7)
 enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RESTORE = 5, TIMER_RIPPLE = 6, TIMER_SPIN = 7, TIMER_SAVE = 8,
-       TIMER_LENS = 9 };
-enum { HOTKEY_PRESENTATION = 1, HOTKEY_ESCAPE, HOTKEY_ZOOM, HOTKEY_DRAW, HOTKEY_ZOOM_IN, HOTKEY_ZOOM_OUT, HOTKEY_UNDO };
-enum { ID_QUIT = 100, ID_SETTINGS, ID_PRESENTATION, ID_ZOOM, ID_DRAW, ID_SHORTCUTS, ID_FIX_BASE = 150 };
+       TIMER_LENS = 9, TIMER_SELECTION_START = 10 };
+enum { HOTKEY_PRESENTATION = 1, HOTKEY_ESCAPE, HOTKEY_ZOOM, HOTKEY_DRAW, HOTKEY_ZOOM_IN, HOTKEY_ZOOM_OUT, HOTKEY_UNDO, HOTKEY_NUMERALS };
+enum { ID_QUIT = 100, ID_SETTINGS, ID_PRESENTATION, ID_ZOOM, ID_DRAW, ID_SHORTCUTS, ID_CONVERT_LANGUAGE, ID_CONVERT_NUMERALS, ID_NUMERAL_ENABLED, ID_FIX_BASE = 150 };
 
 static HINSTANCE g_inst;
 static HWND g_badge, g_host;
@@ -557,6 +565,47 @@ static HICON g_trayIcon;
 static float DpiScaleOf(UINT dpi) { return dpi / 96.0f; }
 static float Scale() { return kSizeScale[g_set.size] * DpiScaleOf(g_dpi); }
 
+// Current cursor geometry, including the hotspot of arrows, hands, I-beams, etc.
+// Cache bitmap inspection; GetIconInfo allocates GDI bitmaps which must be released.
+static HCURSOR g_cursorHandle = nullptr;
+static DWORD g_cursorMeasuredAt = 0;
+static UINT g_cursorDpi = 0;
+static int g_cursorMetricW = 0, g_cursorMetricH = 0;
+static lf::BadgeRect g_cursorBounds = {0, 0, 32, 32};
+static bool UpdateCursorBounds() {
+    CURSORINFO ci = {sizeof(ci)};
+    if (!GetCursorInfo(&ci) || !ci.hCursor) return false;
+    int mw = GetSystemMetricsForDpi(SM_CXCURSOR, g_dpi), mh = GetSystemMetricsForDpi(SM_CYCURSOR, g_dpi);
+    DWORD now = GetTickCount();
+    if (ci.hCursor == g_cursorHandle && g_cursorDpi == g_dpi && mw == g_cursorMetricW && mh == g_cursorMetricH &&
+        now - g_cursorMeasuredAt < 500) return false;
+    g_cursorHandle = ci.hCursor;
+    g_cursorDpi = g_dpi;
+    g_cursorMetricW = mw; g_cursorMetricH = mh;
+    g_cursorMeasuredAt = now;
+    lf::BadgeRect next = {0, 0, (double)std::max(mw, 1), (double)std::max(mh, 1)};
+    ICONINFO info = {};
+    if (GetIconInfo(ci.hCursor, &info)) {
+        BITMAP bmp = {};
+        if (GetObjectW(info.hbmColor ? info.hbmColor : info.hbmMask, sizeof(bmp), &bmp)) {
+            int w = bmp.bmWidth, h = info.hbmColor ? bmp.bmHeight : bmp.bmHeight / 2;
+            if (w > 0 && h > 0) {
+                // Some shared cursors expose their source bitmap; account for the
+                // larger effective cursor size selected in Windows Accessibility.
+                double sx = std::max(1.0, (double)mw / w), sy = std::max(1.0, (double)mh / h);
+                next = {-(double)info.xHotspot * sx, -(double)info.yHotspot * sy,
+                        (w - (double)info.xHotspot) * sx, (h - (double)info.yHotspot) * sy};
+            }
+        }
+        if (info.hbmColor) DeleteObject(info.hbmColor);
+        if (info.hbmMask) DeleteObject(info.hbmMask);
+    }
+    bool changed = next.left != g_cursorBounds.left || next.top != g_cursorBounds.top ||
+                   next.right != g_cursorBounds.right || next.bottom != g_cursorBounds.bottom;
+    g_cursorBounds = next;
+    return changed;
+}
+
 static void Present(bool includePos) {
     if (!g_img.px) return;
     POINT src = {0, 0};
@@ -566,10 +615,11 @@ static void Present(bool includePos) {
     if (includePos) {
         float s = Scale();
         int bw = g_img.w - 2 * g_pad, bh = g_img.h - 2 * g_pad;
-        int x = g_pt.x + (int)(14 * s), y = g_pt.y + (int)(20 * s);
-        if (x + bw > g_workRect.right) x = g_pt.x - (int)(6 * s) - bw;  // flip left
-        if (y + bh > g_workRect.bottom) y = g_pt.y - (int)(8 * s) - bh;  // flip up
-        dst = {x - g_pad, y - g_pad};
+        UpdateCursorBounds();
+        lf::BadgeRect screen = {(double)g_workRect.left - g_pt.x, (double)g_workRect.top - g_pt.y,
+                                (double)g_workRect.right - g_pt.x, (double)g_workRect.bottom - g_pt.y};
+        auto p = lf::placeBadge(screen, g_cursorBounds, bw, bh, 4 * DpiScaleOf(g_dpi), 20 * s);
+        dst = {g_pt.x + (LONG)std::lround(p.x) - g_pad, g_pt.y + (LONG)std::lround(p.y) - g_pad};
     }
     UpdateLayeredWindow(g_badge, nullptr, includePos ? &dst : nullptr, &sz, g_img.dc, &src, 0, &bf, ULW_ALPHA);
 }
@@ -1124,6 +1174,8 @@ struct Rule {
 };
 static Rule g_rules[500];
 static int g_ruleCount = 0;
+static lf::DoubleTap g_altTap;
+static bool g_keysPaused = false;
 static bool g_shiftDown = false, g_shiftClean = false;
 static DWORD g_shiftDownAt = 0, g_lastShiftTap = 0;
 
@@ -1360,6 +1412,15 @@ static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
     if (k->flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, wp, lp);  // ours or another tool's
     const bool down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
 
+    if (g_set.numeralEnabled && g_set.numeralMode == 1 && !g_keysPaused) {
+        if (k->vkCode == VK_LMENU || k->vkCode == VK_RMENU || k->vkCode == VK_MENU) {
+            bool alone = !(GetAsyncKeyState(VK_CONTROL) & 0x8000) && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+                         !(GetAsyncKeyState(VK_LWIN) & 0x8000) && !(GetAsyncKeyState(VK_RWIN) & 0x8000);
+            if (g_altTap.update(down, k->time, alone)) PostMessageW(g_host, WM_APP_SELECTION, 1, 0);
+        } else if (down) g_altTap.reset();
+    }
+    if (!g_set.autoFix) return CallNextHookEx(nullptr, code, wp, lp);
+
     if (k->vkCode == VK_LSHIFT || k->vkCode == VK_RSHIFT || k->vkCode == VK_SHIFT) {
         if (down) {
             if (!g_shiftDown) { g_shiftDown = true; g_shiftClean = true; g_shiftDownAt = k->time; }  // not repeats
@@ -1409,6 +1470,8 @@ static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
 
 static void SetAutoFix(bool on) {
     ResetWords();
+    on = on || (g_set.numeralEnabled && g_set.numeralMode == 1);
+    g_altTap.reset();
     if (on && !g_kbHook) g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHook, g_inst, 0);
     if (!on && g_kbHook) { UnhookWindowsHookEx(g_kbHook); g_kbHook = nullptr; }
 }
@@ -1478,7 +1541,12 @@ static struct {
     DWORD seq;
     int tries;
     bool saved;
+    bool numerals;
+    HWND target;
 } g_clip;
+static bool g_selectionPending = false, g_selectionNumerals = false;
+static HWND g_selectionTarget = nullptr;
+static int g_selectionWait = 0;
 
 static void SendChord(WORD vk) {  // Ctrl+<vk>
     INPUT in[4] = {};
@@ -1532,7 +1600,10 @@ static void SaveClipboard() {
 }
 
 static void RestoreClipboard() {
-    if (!g_clip.saved || !OpenClipboardRetry()) return;
+    if (!g_clip.saved) return;
+    if (GetClipboardSequenceNumber() != g_clip.seq) { FreeSavedClipboard(); return; }
+    if (!OpenClipboardRetry()) return;
+    if (GetClipboardSequenceNumber() != g_clip.seq) { CloseClipboard(); FreeSavedClipboard(); return; }
     EmptyClipboard();
     for (int i = 0; i < g_clip.count; i++) SetClipboardData(g_clip.format[i], g_clip.data[i]);  // ownership passes on
     CloseClipboard();
@@ -1540,24 +1611,58 @@ static void RestoreClipboard() {
     g_clip.saved = false;
 }
 
-static void BeginSelectionCopy() {
-    if (ForegroundIsTerminal() || g_clip.saved) return;  // Ctrl+C is "interrupt" there; or a copy is in flight
+static void BeginSelectionCopy(bool numerals = false) {
+    if (numerals && !g_set.numeralEnabled) return;
+    if (ForegroundIsTerminal() || FocusedFieldIsPassword() || g_clip.saved) return;  // Ctrl+C is "interrupt" there; or a copy is in flight
     SaveClipboard();
+    if (!g_clip.saved) return;
+    g_clip.numerals = numerals;
+    g_clip.target = GetForegroundWindow();
+    // A few editors do not republish an identical selection. Clear only after saving
+    // every format, so a successful copy is observable even when it matches the old text.
+    if (!OpenClipboardRetry()) { FreeSavedClipboard(); return; }
+    if (!EmptyClipboard()) { CloseClipboard(); FreeSavedClipboard(); return; }
+    CloseClipboard();
     g_clip.seq = GetClipboardSequenceNumber();
     g_clip.tries = 0;
     SendChord('C');
     SetTimer(g_host, TIMER_COPY, 40, nullptr);
 }
 
+// Let the menu close and the user release shortcut modifiers before Ctrl+C / Ctrl+V.
+static void QueueSelection(bool numerals) {
+    if (numerals && !g_set.numeralEnabled) return;
+    if (g_selectionPending || g_clip.saved) return;
+    g_selectionPending = true;
+    g_selectionNumerals = numerals;
+    g_selectionTarget = GetForegroundWindow();
+    g_selectionWait = 0;
+    SetTimer(g_host, TIMER_SELECTION_START, 40, nullptr);
+}
+static void StartPendingSelection() {
+    if (GetForegroundWindow() != g_selectionTarget || ++g_selectionWait > 50) {
+        KillTimer(g_host, TIMER_SELECTION_START); g_selectionPending = false; return;
+    }
+    for (int vk : {VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN})
+        if (GetAsyncKeyState(vk) & 0x8000) return;
+    KillTimer(g_host, TIMER_SELECTION_START);
+    g_selectionPending = false;
+    BeginSelectionCopy(g_selectionNumerals);
+}
+
 // Polled until the copy lands (or gives up when nothing was selected).
 static void CheckSelectionCopy() {
+    if (GetForegroundWindow() != g_clip.target || FocusedFieldIsPassword()) {
+        KillTimer(g_host, TIMER_COPY); RestoreClipboard(); return;
+    }
     if (GetClipboardSequenceNumber() == g_clip.seq) {
         if (++g_clip.tries < 8) return;
         KillTimer(g_host, TIMER_COPY);
-        FreeSavedClipboard();  // nothing selected: the clipboard was never touched
+        RestoreClipboard();  // nothing selected: restore the snapshot after clearing the clipboard
         return;
     }
     KillTimer(g_host, TIMER_COPY);
+    g_clip.seq = GetClipboardSequenceNumber();
 
     static char16_t in[2001], out[2001];
     int n = 0;
@@ -1571,28 +1676,40 @@ static void CheckSelectionCopy() {
             }
         }
         CloseClipboard();
+        // Reading delayed-rendered text may publish formats and advance the sequence.
+        g_clip.seq = GetClipboardSequenceNumber();
     }
+    if (g_clip.numerals && !g_set.numeralEnabled) { RestoreClipboard(); return; }
     // Too long, or an editor that copies the whole line ("...\r\n") when nothing is selected: leave it.
-    int target = (n == 0 || n > 2000 || in[n - 1] == u'\n') ? -1 : lf::convertText(in, n, out);
+    int target = (n == 0 || n > 2000 || in[n - 1] == u'\n') ? -1 :
+        g_clip.numerals ? (lf::convertNumerals(in, n, out) ? 0 : -1) : lf::convertText(in, n, out);
     if (target < 0) { RestoreClipboard(); return; }
 
-    if (HKL hkl = FindLayout(target)) {
+    if (HKL hkl = g_clip.numerals ? nullptr : FindLayout(target)) {
         HWND fg = GetForegroundWindow();
         if (fg) PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, (LPARAM)hkl);
     }
-    if (OpenClipboardRetry()) {
-        EmptyClipboard();
-        if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (n + 1) * sizeof(char16_t))) {
-            char16_t* d = (char16_t*)GlobalLock(g);
-            memcpy(d, out, n * sizeof(char16_t));
-            d[n] = 0;
-            GlobalUnlock(g);
-            SetClipboardData(CF_UNICODETEXT, g);
-        }
-        CloseClipboard();
+    HGLOBAL replacement = GlobalAlloc(GMEM_MOVEABLE, (n + 1) * sizeof(char16_t));
+    char16_t* d = replacement ? (char16_t*)GlobalLock(replacement) : nullptr;
+    if (!d) { if (replacement) GlobalFree(replacement); RestoreClipboard(); return; }
+    memcpy(d, out, n * sizeof(char16_t));
+    d[n] = 0;
+    GlobalUnlock(replacement);
+    if (!OpenClipboardRetry()) { GlobalFree(replacement); RestoreClipboard(); return; }
+    if (GetClipboardSequenceNumber() != g_clip.seq) {
+        CloseClipboard(); GlobalFree(replacement); FreeSavedClipboard(); return;
     }
+    bool pasted = false;
+    if (EmptyClipboard())
+        pasted = SetClipboardData(CF_UNICODETEXT, replacement) != nullptr;
+    CloseClipboard();
+    // Closing publishes synthesized text formats and may advance the sequence again.
+    g_clip.seq = GetClipboardSequenceNumber();
+    if (!pasted) { GlobalFree(replacement); RestoreClipboard(); return; }
     SendChord('V');
     SetTimer(g_host, TIMER_RESTORE, 300, nullptr);  // after the app has read it
+
+    if (g_clip.numerals) { ResetWords(); return; }
 
     // The pasted text is now "the last word" if it is one, so double Shift flips it straight back.
     FixWord w = {};
@@ -1611,6 +1728,7 @@ static void CheckSelectionCopy() {
 
 static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION && (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) {
+        g_altTap.reset();
         ResetWords();  // caret moved
         if (CircleOn() && !g_drawing) {
             POINT pt = ((MSLLHOOKSTRUCT*)lp)->pt;
@@ -1710,6 +1828,7 @@ static void ApplyAppLanguage() {
 }
 
 static void CALLBACK ForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+    g_altTap.reset();
     g_fullscreen = ForegroundIsFullscreen();
     ClassifyForeground();
     ApplyAppLanguage();
@@ -1740,7 +1859,8 @@ static void AddTrayIcon() {
 static void ReinstallHooks() {
     if (g_mouseHook) UnhookWindowsHookEx(g_mouseHook);
     g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, g_inst, 0);
-    if (g_set.autoFix) { SetAutoFix(false); SetAutoFix(true); }  // also retries a hook that failed to install
+    if (g_kbHook) { UnhookWindowsHookEx(g_kbHook); g_kbHook = nullptr; }
+    SetAutoFix(g_set.autoFix != 0);  // also retries a hook that failed to install
     g_shiftDown = g_shiftClean = false;
     g_lastShiftTap = 0;
     ClassifyForeground();
@@ -1754,21 +1874,21 @@ static void ReinstallHooks() {
 // A shortcut is stored as the hotkey control gives it: the virtual key in the low byte, HOTKEYF_* in the high byte
 // (0 = none). Settings changes them with Windows' own hotkey control, which reads the keys only while it has the focus.
 
-static const int kToolHotkeys[3] = {HOTKEY_PRESENTATION, HOTKEY_ZOOM, HOTKEY_DRAW};
-static const WORD kToolDefaults[3] = {MAKEWORD('H', HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD('Z', HOTKEYF_CONTROL | HOTKEYF_ALT),
-                                      MAKEWORD('D', HOTKEYF_CONTROL | HOTKEYF_ALT)};
-static const wchar_t* kToolNames[2][3] = {{L"Spotlight", L"Zoom", L"Draw on screen"}, {L"สปอตไลต์", L"ซูม", L"วาดบนจอ"}};
+static const int kToolHotkeys[4] = {HOTKEY_PRESENTATION, HOTKEY_ZOOM, HOTKEY_DRAW, HOTKEY_NUMERALS};
+static const WORD kToolDefaults[4] = {MAKEWORD('H', HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD('Z', HOTKEYF_CONTROL | HOTKEYF_ALT),
+                                      MAKEWORD('D', HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD(VK_OEM_3, HOTKEYF_CONTROL)};
+static const wchar_t* kToolNames[2][4] = {{L"Spotlight", L"Zoom", L"Draw on screen", L"Thai / Arabic numerals"}, {L"สปอตไลต์", L"ซูม", L"วาดบนจอ", L"เลขไทย / อารบิก"}};
 static DWORD* ToolKey(int i) {
-    DWORD* keys[] = {&g_set.keySpotlight, &g_set.keyZoom, &g_set.keyDraw};
+    DWORD* keys[] = {&g_set.keySpotlight, &g_set.keyZoom, &g_set.keyDraw, &g_set.keyNumerals};
     return keys[i];
 }
 
 // Registers the tools' shortcuts; returns a bit for each tool whose keys another app already has.
 static int RegisterToolKeys() {
     int failed = 0;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         UnregisterHotKey(g_host, kToolHotkeys[i]);
-        DWORD k = *ToolKey(i);
+        DWORD k = i == 3 && (!g_set.numeralEnabled || g_set.numeralMode != 2) ? 0 : *ToolKey(i);
         BYTE f = HIBYTE(k);
         UINT mods = (f & HOTKEYF_CONTROL ? MOD_CONTROL : 0) | (f & HOTKEYF_ALT ? MOD_ALT : 0) | (f & HOTKEYF_SHIFT ? MOD_SHIFT : 0);
         if (k && !RegisterHotKey(g_host, kToolHotkeys[i], mods | MOD_NOREPEAT, LOBYTE(k))) failed |= 1 << i;
@@ -1780,6 +1900,15 @@ static void UnregisterToolKeys() {
     for (int id : kToolHotkeys) UnregisterHotKey(g_host, id);
 }
 
+static void SetNumeralEnabled(bool enabled) {
+    g_set.numeralEnabled = enabled;
+    SetAutoFix(g_set.autoFix != 0);
+    RegisterToolKeys();
+    if (g_keysPaused) UnregisterToolKeys();
+    SaveSettings();
+    SettingsReload(TAB_NUMERALS);
+}
+
 // "Ctrl+Alt+H"; empty for none.
 static void KeyText(DWORD k, wchar_t* out, int n) {
     out[0] = 0;
@@ -1789,6 +1918,8 @@ static void KeyText(DWORD k, wchar_t* out, int n) {
     if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
         name[0] = vk;  // not GetKeyNameText: under the Thai layout it would name the Thai letter
         name[1] = 0;
+    } else if (vk == VK_OEM_3) {
+        wcscpy(name, L"`");
     } else {
         LONG sc = (LONG)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) << 16;
         if (f & HOTKEYF_EXT) sc |= 1 << 24;
@@ -1808,14 +1939,14 @@ static void KeyText(DWORD k, wchar_t* out, int n) {
 
 enum {
     CTL_CAPTION = 2000, CTL_STATUS, CTL_PREVIEW, CTL_MODE, CTL_STYLE, CTL_SIZE, CTL_BORDER,
-    CTL_FIX_BASE = 2100, CTL_EDITORS = 2110, CTL_FORGET, CTL_PER_APP,
+    CTL_FIX_BASE = 2100, CTL_EDITORS = 2110, CTL_FORGET, CTL_PER_APP, CTL_NUMERAL_MODE, CTL_NUMERAL_ENABLED,
     CTL_TOOL_BASE = 2200, CTL_KEY_BASE = 2210, CTL_RESTORE = 2220, CTL_RADIUS, CTL_ZOOM_LEVEL, CTL_RADIUS_VALUE, CTL_ZOOM_VALUE,
     CTL_STARTUP = 2300, CTL_UI_LANG, CTL_REPORT, CTL_STAR, CTL_CONTRIBUTE, CTL_KOFI, CTL_QR, CTL_COPY_NUMBER,
     CTL_COLOR_BASE = 2400, CTL_DEFAULT_BASE = 2500, CTL_SHOW_BASE = 2600, kMaxRows = 64,
 };
 #define WM_APP_RELOAD (WM_APP + 20)
-static const wchar_t* kTabNames[2][4] = {{L"Badge", L"Fix Wrong Language", L"Presentation", L"General"},
-                                         {L"ป้ายภาษา", L"แก้คำผิดภาษา", L"นำเสนอ", L"ทั่วไป"}};
+static const wchar_t* kTabNames[2][5] = {{L"Badge", L"Fix Wrong Language", L"Convert Numerals", L"Presentation", L"General"},
+                                         {L"ป้ายภาษา", L"แก้คำผิดภาษา", L"สลับตัวเลข", L"นำเสนอ", L"ทั่วไป"}};
 
 // PromptPay, Thailand's bank transfer, for donations. The QR code is a static PromptPay QR (EMVCo) for this number
 // with no amount, so the payer types it in their banking app. Windows has no QR encoder, so the modules are kept
@@ -1859,7 +1990,7 @@ static HWND g_setWnd, g_setTabs, g_setPage;
 static int g_setTab = TAB_BADGE;
 static UINT g_setDpi = 96;
 static HFONT g_fontText, g_fontBold, g_fontHead;
-static bool g_setActive = false, g_keysPaused = false, g_reloadPosted = false;
+static bool g_setActive = false, g_reloadPosted = false;
 static wchar_t g_keyStatus[128];  // the last shortcut problem, shown under the tools
 
 // The look of the Settings window: Windows 11's light or dark colours (following "app mode" in Windows), or the system
@@ -2068,9 +2199,10 @@ static void SetFixMode(int pick) {
 
 // The tools' shortcuts are released while the Presentation tab is in front, so pressing one reaches its box.
 static void UpdateKeyPause() {
-    bool pause = g_setWnd && g_setActive && g_setTab == TAB_PRESENT;
+    bool pause = g_setWnd && g_setActive && (g_setTab == TAB_PRESENT || g_setTab == TAB_NUMERALS);
     if (pause == g_keysPaused) return;
     g_keysPaused = pause;
+    g_altTap.reset();
     if (pause) UnregisterToolKeys();
     else RegisterToolKeys();
 }
@@ -2220,12 +2352,32 @@ static void BuildBadgeTab(Page& p) {
     }
 }
 
+static void BuildNumeralTab(Page& p) {
+    p.Header(TR(L"Convert Thai / Arabic numerals", L"สลับเลขไทย / อารบิก"));
+    p.Check(TR(L"Enable numeral conversion", L"เปิดการสลับเลขไทย / อารบิก"), g_set.numeralEnabled != 0, CTL_NUMERAL_ENABLED);
+    p.Caption(TR(L"Select text, then press Ctrl+` (backtick). You can change the shortcut below. Only digits change. Backspace clears the shortcut.",
+                 L"เลือกข้อความแล้วกด Ctrl+` (backtick) เปลี่ยนคีย์ลัดได้ด้านล่าง โดยเปลี่ยนเฉพาะตัวเลข กด Backspace ในช่องคีย์ลัดเพื่อล้าง"));
+    HWND modeBox = p.Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, Page::L, p.y, 300, 200, CTL_NUMERAL_MODE);
+    for (const wchar_t* name : {TR(L"Menu only", L"ใช้เมนูเท่านั้น"), TR(L"Double Alt", L"กด Alt 2 ครั้ง"), TR(L"Custom shortcut", L"คีย์ลัดที่กำหนดเอง")})
+        SendMessageW(modeBox, CB_ADDSTRING, 0, (LPARAM)name);
+    SendMessageW(modeBox, CB_SETCURSEL, g_set.numeralMode, 0);
+    HWND key = p.Add(HOTKEY_CLASSW, L"", WS_TABSTOP, 350, p.y, 150, 28, CTL_KEY_BASE + 3);
+    SendMessageW(key, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
+    SendMessageW(key, HKM_SETHOTKEY, g_set.keyNumerals, 0);
+    p.y += 32;
+    p.Add(L"STATIC", g_keyStatus, SS_NOPREFIX, Page::L, p.y, Page::W, 28, CTL_STATUS);
+    p.y += 28;
+    p.Separator();
+    p.Caption(TR(L"For mixed selections, each digit is toggled: 12 / ๓๔ becomes ๑๒ / 34. Your input language stays unchanged.",
+                 L"หากมีเลขปนกัน จะสลับทีละตัว: 12 / ๓๔ เป็น ๑๒ / 34 โดยไม่เปลี่ยนภาษาแป้นพิมพ์"));
+}
+
 static void BuildFixTab(Page& p) {
     const int th = UiThai();
     const int mode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
     p.Header(TR(L"Fix Wrong Language (EN \u21C4 TH)", L"แก้คำที่พิมพ์ผิดภาษา (EN \u21C4 TH)"));
     const wchar_t* details[3] = {
-        TR(L"Nothing is fixed, and CursorLingo doesn't look at your typing at all.", L"ไม่แก้อะไรให้ และไม่ดูสิ่งที่คุณพิมพ์เลย"),
+        TR(L"Language fixing is off. Numeral shortcuts are configured separately.", L"ปิดการแก้คำผิดภาษา ส่วนคีย์ลัดตัวเลขตั้งค่าแยกได้"),
         TR(L"Tap Shift twice to switch the last word (or the selected text) to the other language.",
            L"พิมพ์ผิดภาษาเมื่อไหร่ กด Shift 2 ครั้งติดกัน คำล่าสุด (หรือข้อความที่เลือกไว้) จะเปลี่ยนเป็นอีกภาษาให้"),
         TR(L"Words typed in the wrong language are fixed as you type. If a fix is wrong, double Shift puts it back.",
@@ -2418,7 +2570,7 @@ static void ApplyKey(int i, HWND box);
 
 // Keeps what the shortcut boxes on the page say, before the page goes away.
 static void ApplyKeyBoxes() {
-    for (int i = 0; i < 3 && g_setPage; i++) {
+    for (int i = 0; i < 4 && g_setPage; i++) {
         HWND box = GetDlgItem(g_setPage, CTL_KEY_BASE + i);
         if (box && (WORD)SendMessageW(box, HKM_GETHOTKEY, 0, 0) != *ToolKey(i)) ApplyKey(i, box);
     }
@@ -2440,6 +2592,7 @@ static void BuildPage() {
     switch (g_setTab) {
         case TAB_BADGE: BuildBadgeTab(p); break;
         case TAB_FIX: BuildFixTab(p); break;
+        case TAB_NUMERALS: BuildNumeralTab(p); break;
         case TAB_PRESENT: BuildPresentTab(p); ShowSliderValues(); break;
         default: BuildGeneralTab(p); break;
     }
@@ -2811,19 +2964,26 @@ static void ApplyKey(int i, HWND box) {
                               MAKEWORD('Z', HOTKEYF_CONTROL)};
     for (DWORD r : reserved)
         if (k == r) swprintf(g_keyStatus, 128, TR(L"%ls is taken while a tool is on. Pick another.", L"%ls ใช้ตอนเปิดเครื่องมืออยู่แล้ว เลือกคีย์อื่นนะ"), text);
-    for (int j = 0; j < 3 && !g_keyStatus[0]; j++)
+    for (int j = 0; j < 4 && !g_keyStatus[0]; j++)
         if (j != i && k && *ToolKey(j) == k)
             swprintf(g_keyStatus, 128, TR(L"%ls is already used for %ls.", L"%ls ใช้กับ%lsอยู่แล้ว"), text, kToolNames[UiThai()][j]);
     if (!g_keyStatus[0]) {
         const DWORD old = *ToolKey(i);
+        const DWORD oldMode = g_set.numeralMode;
+        if (i == 3) g_set.numeralMode = 2;
         *ToolKey(i) = k;
         const int failed = RegisterToolKeys();
         if (g_keysPaused) UnregisterToolKeys();
         if (failed & (1 << i)) {
             *ToolKey(i) = old;
+            g_set.numeralMode = oldMode;
             if (!g_keysPaused) RegisterToolKeys();
             swprintf(g_keyStatus, 128, TR(L"Another app already uses %ls.", L"มีแอปอื่นใช้ %ls อยู่แล้ว"), text);
         } else {
+            if (i == 3) {
+                SetAutoFix(g_set.autoFix != 0);
+                SendDlgItemMessageW(g_setPage, CTL_NUMERAL_MODE, CB_SETCURSEL, 2, 0);
+            }
             SaveSettings();
         }
     }
@@ -2871,6 +3031,26 @@ static void PageCommand(int id, int code, HWND ctl) {
         if (!checked) return;
         SetFixMode(id - CTL_FIX_BASE);
         SettingsReload(TAB_FIX);  // code editors only apply to Automatic
+    } else if (id == CTL_NUMERAL_ENABLED) {
+        SetNumeralEnabled(checked);
+    } else if (id == CTL_NUMERAL_MODE && code == CBN_SELCHANGE) {
+        DWORD previous = g_set.numeralMode;
+        g_set.numeralMode = (DWORD)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
+        int failed = RegisterToolKeys();
+        if (g_set.numeralMode == 2 && (failed & (1 << 3))) {
+            g_set.numeralMode = previous;
+            RegisterToolKeys();
+            SendMessageW(ctl, CB_SETCURSEL, previous, 0);
+            wcscpy(g_keyStatus, TR(L"The saved shortcut is in use. Clear it or choose another.", L"คีย์ลัดเดิมถูกใช้อยู่ กรุณาล้างหรือตั้งคีย์ใหม่"));
+            SetDlgItemTextW(g_setPage, CTL_STATUS, g_keyStatus);
+            if (g_keysPaused) UnregisterToolKeys();
+            return;
+        }
+        if (g_keysPaused) UnregisterToolKeys();
+        SetAutoFix(g_set.autoFix != 0);
+        g_keyStatus[0] = 0;
+        SaveSettings();
+        SettingsReload(TAB_NUMERALS);
     } else if (id == CTL_EDITORS) {
         g_set.codeEditorsManual = checked;
         SaveSettings();
@@ -2891,7 +3071,7 @@ static void PageCommand(int id, int code, HWND ctl) {
             SetDrawing(checked);
         }
         SettingsReload(TAB_PRESENT);  // Zoom may not be there
-    } else if (id >= CTL_KEY_BASE && id < CTL_KEY_BASE + 3) {
+    } else if (id >= CTL_KEY_BASE && id < CTL_KEY_BASE + 4) {
         if (code == EN_CHANGE) ApplyKey(id - CTL_KEY_BASE, ctl);
     } else if (id == CTL_RESTORE) {
         for (int i = 0; i < 3; i++) {
@@ -3129,6 +3309,7 @@ static void ShowSettings(int tab) {
 }
 
 static void ShowMenu() {
+    HWND selectionTarget = GetForegroundWindow();
     HMENU m = CreatePopupMenu(), fix = CreatePopupMenu(), present = CreatePopupMenu();
     const int th = UiThai();
     wchar_t buf[64];
@@ -3155,6 +3336,14 @@ static void ShowMenu() {
     wchar_t fixTitle[96];
     swprintf(fixTitle, 96, TR(L"Fix wrong language (EN \u21C4 TH): %ls", L"แก้คำที่พิมพ์ผิดภาษา (EN \u21C4 TH): %ls"), kFixNames[th][fixMode]);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)fix, fixTitle);
+    AppendMenuW(m, MF_STRING, ID_CONVERT_LANGUAGE, TR(L"Convert selected language (EN / TH)", L"สลับภาษาข้อความที่เลือก (EN / TH)"));
+    wchar_t numeralKey[32], numeralTitle[128];
+    KeyText(g_set.numeralMode == 2 ? g_set.keyNumerals : 0, numeralKey, 32);
+    swprintf(numeralTitle, 128, L"%ls\t%ls", TR(L"Convert selected Thai / Arabic numerals", L"สลับเลขไทย / อารบิกที่เลือก"),
+             g_set.numeralMode == 1 ? TR(L"Double Alt", L"Alt 2 ครั้ง") : numeralKey);
+    AppendMenuW(m, MF_STRING | (g_set.numeralEnabled ? MF_CHECKED : 0), ID_NUMERAL_ENABLED,
+                TR(L"Enable Thai / Arabic numeral conversion", L"เปิดการสลับเลขไทย / อารบิก"));
+    AppendMenuW(m, MF_STRING | (g_set.numeralEnabled ? 0 : MF_GRAYED), ID_CONVERT_NUMERALS, numeralTitle);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_SETTINGS, TR(L"Settings\u2026", L"ตั้งค่า\u2026"));
     AppendMenuW(m, MF_STRING, ID_QUIT, TR(L"Quit CursorLingo", L"ปิด CursorLingo"));
@@ -3165,7 +3354,10 @@ static void ShowMenu() {
     UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, g_host, nullptr);
     DestroyMenu(m);  // destroys submenus too
 
-    if (cmd == ID_QUIT) DestroyWindow(g_host);
+    if (cmd == ID_CONVERT_LANGUAGE || cmd == ID_CONVERT_NUMERALS) {
+        if (IsWindow(selectionTarget) && SetForegroundWindow(selectionTarget)) QueueSelection(cmd == ID_CONVERT_NUMERALS);
+    } else if (cmd == ID_NUMERAL_ENABLED) SetNumeralEnabled(!g_set.numeralEnabled);
+    else if (cmd == ID_QUIT) DestroyWindow(g_host);
     else if (cmd == ID_SETTINGS) ShowSettings(-1);
     else if (cmd == ID_SHORTCUTS) ShowSettings(TAB_PRESENT);
     else if (cmd == ID_PRESENTATION) {
@@ -3196,6 +3388,7 @@ static LRESULT CALLBACK BadgeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     SettingsReload(TAB_BADGE);  // the preview shows the language in use
                 }
                 if (g_lastHkl != before) RememberAppLanguage(g_lastHkl);
+                if (g_visible && UpdateCursorBounds()) Present(true);
             } else if (wp == TIMER_HIDE) {
                 KillTimer(h, TIMER_HIDE);
                 SetVisible(false, true);
@@ -3225,7 +3418,7 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             ApplyFlips();
             return 0;
         case WM_APP_SELECTION:
-            BeginSelectionCopy();
+            QueueSelection(wp != 0);
             return 0;
         case WM_APP_LEARN:
             LearnPending();
@@ -3237,7 +3430,9 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             ResizeSpotlight((int)(short)wp);
             return 0;
         case WM_HOTKEY:
-            if (wp == HOTKEY_PRESENTATION) {
+            if (wp == HOTKEY_NUMERALS) {
+                QueueSelection(true);
+            } else if (wp == HOTKEY_PRESENTATION) {
                 SetPresentation(!g_set.presentation);
                 SaveSettings();
             } else if (wp == HOTKEY_ZOOM) {
@@ -3260,6 +3455,7 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_TIMER:
+            if (wp == TIMER_SELECTION_START) StartPendingSelection();
             if (wp == TIMER_COPY) CheckSelectionCopy();
             if (wp == TIMER_RESTORE) { KillTimer(h, TIMER_RESTORE); RestoreClipboard(); }
             if (wp == TIMER_RIPPLE) StepRipples();
@@ -3275,7 +3471,10 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_DISPLAYCHANGE:
         case WM_SETTINGCHANGE:
+            g_cursorHandle = nullptr;  // cursor size/theme may have changed while the mouse was still
             g_monRect = {1, 1, 0, 0};  // force monitor re-query
+            UpdateMonitor(g_pt);
+            if (g_visible) Present(true);
             if (msg == WM_DISPLAYCHANGE && CircleOn()) {
                 PlaceDim();
                 MoveHalo();
@@ -3391,7 +3590,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, inst, 0);
     ClassifyForeground();
     LoadRules();
-    if (g_set.autoFix) SetAutoFix(true);
+    SetAutoFix(g_set.autoFix != 0);
     WTSRegisterSessionNotification(g_host, NOTIFY_FOR_THIS_SESSION);  // screen lock / unlock
     g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, ForegroundChanged, 0, 0,
                                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
@@ -3408,10 +3607,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         DispatchMessageW(&msg);
     }
 
-    for (int id : {HOTKEY_PRESENTATION, HOTKEY_ZOOM, HOTKEY_DRAW}) UnregisterHotKey(g_host, id);
+    for (int id : kToolHotkeys) UnregisterHotKey(g_host, id);
     WTSUnRegisterSessionNotification(g_host);
     UnhookWindowsHookEx(g_mouseHook);
-    SetAutoFix(false);
+    if (g_kbHook) UnhookWindowsHookEx(g_kbHook);
+    FreeSavedClipboard();
     UnhookWinEvent(g_fgHook);
     if (g_trayIcon) DestroyIcon(g_trayIcon);
     CoUninitialize();

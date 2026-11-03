@@ -16,6 +16,12 @@ bool lf_should_convert(const uint8_t* keys, int n, int onScreen, bool finished);
 // Re-reads a selection through the other layout (n units in, n units out). Returns the target layout
 // (0 = English, 1 = Thai), or -1 when nothing would change.
 int lf_convert_text(const uint16_t* in, int n, uint16_t* out);
+// Toggles Thai / Arabic digits by value; returns whether anything changed.
+bool lf_convert_numerals(const uint16_t* in, int n, uint16_t* out);
+// Badge placement: screen/cursor are [left, top, right, bottom], Y down;
+// coordinates are relative to the cursor hotspot. Writes [x, y] to out.
+void lf_place_badge(const double* screen, const double* cursor, double width, double height,
+                    double gap, double preferred_y, double* out);
 // Key index (with 0x80 for Shift) that types `c` in `lang`, or -1.
 int lf_key_for_char(uint16_t c, int lang);
 // Index range of the letter keys (for Caps Lock handling): true when the key is a QWERTY letter.
