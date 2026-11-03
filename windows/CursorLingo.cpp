@@ -42,6 +42,7 @@
 #include "resource.h"
 #include "../core/layoutfix.h"
 #include "../core/numerals.h"
+#include "../core/badge_position.h"
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -76,14 +77,15 @@ struct Settings {
     DWORD spotRadius = 100;     // spotlight radius in points (40..300)
     DWORD zoomLevel = 20;       // zoom lens magnification, in tenths (15..80)
     DWORD keySpotlight = 0x648, keyZoom = 0x65A, keyDraw = 0x644;  // tool shortcuts (see RegisterToolKeys), Ctrl+Alt+H/Z/D
-    DWORD numeralMode = 1;     // 0 = menu only, 1 = double Alt, 2 = custom shortcut
-    DWORD keyNumerals = 0;      // user-defined chord, independent of language fixing
+    DWORD numeralEnabled = 1;
+    DWORD numeralMode = 2;     // 0 = menu only, 1 = double Alt, 2 = custom shortcut
+    DWORD keyNumerals = 0x2C0;      // user-defined chord, independent of language fixing
     DWORD badgeBorder = 1;      // the badge's thin border and shadow
     wchar_t hidden[256] = L"";  // comma separated codes, e.g. ",EN,JA,"
 } g_set;
 
 // The Settings window (see below) shows the open tab again when something it shows changes.
-enum { TAB_BADGE, TAB_FIX, TAB_PRESENT, TAB_GENERAL, TAB_NUMERALS, TAB_COUNT };
+enum { TAB_BADGE, TAB_FIX, TAB_NUMERALS, TAB_PRESENT, TAB_GENERAL, TAB_COUNT };
 static void SettingsReload(int tab);
 
 // ---------------------------------------------------------------------------
@@ -116,8 +118,9 @@ static const SettingField kFields[] = {
     {L"ShortcutSpotlight", &g_set.keySpotlight, 0x648, 0x10000},
     {L"ShortcutZoom", &g_set.keyZoom, 0x65A, 0x10000},
     {L"ShortcutDraw", &g_set.keyDraw, 0x644, 0x10000},
-    {L"NumeralMode", &g_set.numeralMode, 1, 3},
-    {L"ShortcutNumerals", &g_set.keyNumerals, 0, 0x10000},
+    {L"NumeralEnabled", &g_set.numeralEnabled, 1, 2},
+    {L"NumeralMode", &g_set.numeralMode, 2, 3},
+    {L"ShortcutNumerals", &g_set.keyNumerals, 0x2C0, 0x10000},
     {L"BadgeBorder", &g_set.badgeBorder, 1, 2},
 };
 
@@ -541,7 +544,7 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
 enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RESTORE = 5, TIMER_RIPPLE = 6, TIMER_SPIN = 7, TIMER_SAVE = 8,
        TIMER_LENS = 9, TIMER_SELECTION_START = 10 };
 enum { HOTKEY_PRESENTATION = 1, HOTKEY_ESCAPE, HOTKEY_ZOOM, HOTKEY_DRAW, HOTKEY_ZOOM_IN, HOTKEY_ZOOM_OUT, HOTKEY_UNDO, HOTKEY_NUMERALS };
-enum { ID_QUIT = 100, ID_SETTINGS, ID_PRESENTATION, ID_ZOOM, ID_DRAW, ID_SHORTCUTS, ID_CONVERT_LANGUAGE, ID_CONVERT_NUMERALS, ID_FIX_BASE = 150 };
+enum { ID_QUIT = 100, ID_SETTINGS, ID_PRESENTATION, ID_ZOOM, ID_DRAW, ID_SHORTCUTS, ID_CONVERT_LANGUAGE, ID_CONVERT_NUMERALS, ID_NUMERAL_ENABLED, ID_FIX_BASE = 150 };
 
 static HINSTANCE g_inst;
 static HWND g_badge, g_host;
@@ -562,6 +565,47 @@ static HICON g_trayIcon;
 static float DpiScaleOf(UINT dpi) { return dpi / 96.0f; }
 static float Scale() { return kSizeScale[g_set.size] * DpiScaleOf(g_dpi); }
 
+// Current cursor geometry, including the hotspot of arrows, hands, I-beams, etc.
+// Cache bitmap inspection; GetIconInfo allocates GDI bitmaps which must be released.
+static HCURSOR g_cursorHandle = nullptr;
+static DWORD g_cursorMeasuredAt = 0;
+static UINT g_cursorDpi = 0;
+static int g_cursorMetricW = 0, g_cursorMetricH = 0;
+static lf::BadgeRect g_cursorBounds = {0, 0, 32, 32};
+static bool UpdateCursorBounds() {
+    CURSORINFO ci = {sizeof(ci)};
+    if (!GetCursorInfo(&ci) || !ci.hCursor) return false;
+    int mw = GetSystemMetricsForDpi(SM_CXCURSOR, g_dpi), mh = GetSystemMetricsForDpi(SM_CYCURSOR, g_dpi);
+    DWORD now = GetTickCount();
+    if (ci.hCursor == g_cursorHandle && g_cursorDpi == g_dpi && mw == g_cursorMetricW && mh == g_cursorMetricH &&
+        now - g_cursorMeasuredAt < 500) return false;
+    g_cursorHandle = ci.hCursor;
+    g_cursorDpi = g_dpi;
+    g_cursorMetricW = mw; g_cursorMetricH = mh;
+    g_cursorMeasuredAt = now;
+    lf::BadgeRect next = {0, 0, (double)std::max(mw, 1), (double)std::max(mh, 1)};
+    ICONINFO info = {};
+    if (GetIconInfo(ci.hCursor, &info)) {
+        BITMAP bmp = {};
+        if (GetObjectW(info.hbmColor ? info.hbmColor : info.hbmMask, sizeof(bmp), &bmp)) {
+            int w = bmp.bmWidth, h = info.hbmColor ? bmp.bmHeight : bmp.bmHeight / 2;
+            if (w > 0 && h > 0) {
+                // Some shared cursors expose their source bitmap; account for the
+                // larger effective cursor size selected in Windows Accessibility.
+                double sx = std::max(1.0, (double)mw / w), sy = std::max(1.0, (double)mh / h);
+                next = {-(double)info.xHotspot * sx, -(double)info.yHotspot * sy,
+                        (w - (double)info.xHotspot) * sx, (h - (double)info.yHotspot) * sy};
+            }
+        }
+        if (info.hbmColor) DeleteObject(info.hbmColor);
+        if (info.hbmMask) DeleteObject(info.hbmMask);
+    }
+    bool changed = next.left != g_cursorBounds.left || next.top != g_cursorBounds.top ||
+                   next.right != g_cursorBounds.right || next.bottom != g_cursorBounds.bottom;
+    g_cursorBounds = next;
+    return changed;
+}
+
 static void Present(bool includePos) {
     if (!g_img.px) return;
     POINT src = {0, 0};
@@ -571,10 +615,11 @@ static void Present(bool includePos) {
     if (includePos) {
         float s = Scale();
         int bw = g_img.w - 2 * g_pad, bh = g_img.h - 2 * g_pad;
-        int x = g_pt.x + (int)(14 * s), y = g_pt.y + (int)(20 * s);
-        if (x + bw > g_workRect.right) x = g_pt.x - (int)(6 * s) - bw;  // flip left
-        if (y + bh > g_workRect.bottom) y = g_pt.y - (int)(8 * s) - bh;  // flip up
-        dst = {x - g_pad, y - g_pad};
+        UpdateCursorBounds();
+        lf::BadgeRect screen = {(double)g_workRect.left - g_pt.x, (double)g_workRect.top - g_pt.y,
+                                (double)g_workRect.right - g_pt.x, (double)g_workRect.bottom - g_pt.y};
+        auto p = lf::placeBadge(screen, g_cursorBounds, bw, bh, 4 * DpiScaleOf(g_dpi), 20 * s);
+        dst = {g_pt.x + (LONG)std::lround(p.x) - g_pad, g_pt.y + (LONG)std::lround(p.y) - g_pad};
     }
     UpdateLayeredWindow(g_badge, nullptr, includePos ? &dst : nullptr, &sz, g_img.dc, &src, 0, &bf, ULW_ALPHA);
 }
@@ -1367,7 +1412,7 @@ static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
     if (k->flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, wp, lp);  // ours or another tool's
     const bool down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
 
-    if (g_set.numeralMode == 1 && !g_keysPaused) {
+    if (g_set.numeralEnabled && g_set.numeralMode == 1 && !g_keysPaused) {
         if (k->vkCode == VK_LMENU || k->vkCode == VK_RMENU || k->vkCode == VK_MENU) {
             bool alone = !(GetAsyncKeyState(VK_CONTROL) & 0x8000) && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
                          !(GetAsyncKeyState(VK_LWIN) & 0x8000) && !(GetAsyncKeyState(VK_RWIN) & 0x8000);
@@ -1425,7 +1470,7 @@ static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
 
 static void SetAutoFix(bool on) {
     ResetWords();
-    on = on || g_set.numeralMode == 1;
+    on = on || (g_set.numeralEnabled && g_set.numeralMode == 1);
     g_altTap.reset();
     if (on && !g_kbHook) g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHook, g_inst, 0);
     if (!on && g_kbHook) { UnhookWindowsHookEx(g_kbHook); g_kbHook = nullptr; }
@@ -1567,6 +1612,7 @@ static void RestoreClipboard() {
 }
 
 static void BeginSelectionCopy(bool numerals = false) {
+    if (numerals && !g_set.numeralEnabled) return;
     if (ForegroundIsTerminal() || FocusedFieldIsPassword() || g_clip.saved) return;  // Ctrl+C is "interrupt" there; or a copy is in flight
     SaveClipboard();
     if (!g_clip.saved) return;
@@ -1585,6 +1631,7 @@ static void BeginSelectionCopy(bool numerals = false) {
 
 // Let the menu close and the user release shortcut modifiers before Ctrl+C / Ctrl+V.
 static void QueueSelection(bool numerals) {
+    if (numerals && !g_set.numeralEnabled) return;
     if (g_selectionPending || g_clip.saved) return;
     g_selectionPending = true;
     g_selectionNumerals = numerals;
@@ -1828,7 +1875,7 @@ static void ReinstallHooks() {
 
 static const int kToolHotkeys[4] = {HOTKEY_PRESENTATION, HOTKEY_ZOOM, HOTKEY_DRAW, HOTKEY_NUMERALS};
 static const WORD kToolDefaults[4] = {MAKEWORD('H', HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD('Z', HOTKEYF_CONTROL | HOTKEYF_ALT),
-                                      MAKEWORD('D', HOTKEYF_CONTROL | HOTKEYF_ALT), 0};
+                                      MAKEWORD('D', HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD(VK_OEM_3, HOTKEYF_CONTROL)};
 static const wchar_t* kToolNames[2][4] = {{L"Spotlight", L"Zoom", L"Draw on screen", L"Thai / Arabic numerals"}, {L"สปอตไลต์", L"ซูม", L"วาดบนจอ", L"เลขไทย / อารบิก"}};
 static DWORD* ToolKey(int i) {
     DWORD* keys[] = {&g_set.keySpotlight, &g_set.keyZoom, &g_set.keyDraw, &g_set.keyNumerals};
@@ -1840,7 +1887,7 @@ static int RegisterToolKeys() {
     int failed = 0;
     for (int i = 0; i < 4; i++) {
         UnregisterHotKey(g_host, kToolHotkeys[i]);
-        DWORD k = i == 3 && g_set.numeralMode != 2 ? 0 : *ToolKey(i);
+        DWORD k = i == 3 && (!g_set.numeralEnabled || g_set.numeralMode != 2) ? 0 : *ToolKey(i);
         BYTE f = HIBYTE(k);
         UINT mods = (f & HOTKEYF_CONTROL ? MOD_CONTROL : 0) | (f & HOTKEYF_ALT ? MOD_ALT : 0) | (f & HOTKEYF_SHIFT ? MOD_SHIFT : 0);
         if (k && !RegisterHotKey(g_host, kToolHotkeys[i], mods | MOD_NOREPEAT, LOBYTE(k))) failed |= 1 << i;
@@ -1852,6 +1899,15 @@ static void UnregisterToolKeys() {
     for (int id : kToolHotkeys) UnregisterHotKey(g_host, id);
 }
 
+static void SetNumeralEnabled(bool enabled) {
+    g_set.numeralEnabled = enabled;
+    SetAutoFix(g_set.autoFix != 0);
+    RegisterToolKeys();
+    if (g_keysPaused) UnregisterToolKeys();
+    SaveSettings();
+    SettingsReload(TAB_NUMERALS);
+}
+
 // "Ctrl+Alt+H"; empty for none.
 static void KeyText(DWORD k, wchar_t* out, int n) {
     out[0] = 0;
@@ -1861,6 +1917,8 @@ static void KeyText(DWORD k, wchar_t* out, int n) {
     if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
         name[0] = vk;  // not GetKeyNameText: under the Thai layout it would name the Thai letter
         name[1] = 0;
+    } else if (vk == VK_OEM_3) {
+        wcscpy(name, L"`");
     } else {
         LONG sc = (LONG)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) << 16;
         if (f & HOTKEYF_EXT) sc |= 1 << 24;
@@ -1880,14 +1938,14 @@ static void KeyText(DWORD k, wchar_t* out, int n) {
 
 enum {
     CTL_CAPTION = 2000, CTL_STATUS, CTL_PREVIEW, CTL_MODE, CTL_STYLE, CTL_SIZE, CTL_BORDER,
-    CTL_FIX_BASE = 2100, CTL_EDITORS = 2110, CTL_FORGET, CTL_PER_APP, CTL_NUMERAL_MODE,
+    CTL_FIX_BASE = 2100, CTL_EDITORS = 2110, CTL_FORGET, CTL_PER_APP, CTL_NUMERAL_MODE, CTL_NUMERAL_ENABLED,
     CTL_TOOL_BASE = 2200, CTL_KEY_BASE = 2210, CTL_RESTORE = 2220, CTL_RADIUS, CTL_ZOOM_LEVEL, CTL_RADIUS_VALUE, CTL_ZOOM_VALUE,
     CTL_STARTUP = 2300, CTL_UI_LANG, CTL_REPORT, CTL_STAR, CTL_CONTRIBUTE, CTL_KOFI, CTL_QR, CTL_COPY_NUMBER,
     CTL_COLOR_BASE = 2400, CTL_DEFAULT_BASE = 2500, CTL_SHOW_BASE = 2600, kMaxRows = 64,
 };
 #define WM_APP_RELOAD (WM_APP + 20)
-static const wchar_t* kTabNames[2][5] = {{L"Badge", L"Fix Wrong Language", L"Presentation", L"General", L"Numerals"},
-                                         {L"ป้ายภาษา", L"แก้คำผิดภาษา", L"นำเสนอ", L"ทั่วไป", L"ตัวเลข"}};
+static const wchar_t* kTabNames[2][5] = {{L"Badge", L"Fix Wrong Language", L"Convert Numerals", L"Presentation", L"General"},
+                                         {L"ป้ายภาษา", L"แก้คำผิดภาษา", L"สลับตัวเลข", L"นำเสนอ", L"ทั่วไป"}};
 
 // PromptPay, Thailand's bank transfer, for donations. The QR code is a static PromptPay QR (EMVCo) for this number
 // with no amount, so the payer types it in their banking app. Windows has no QR encoder, so the modules are kept
@@ -2295,8 +2353,9 @@ static void BuildBadgeTab(Page& p) {
 
 static void BuildNumeralTab(Page& p) {
     p.Header(TR(L"Convert Thai / Arabic numerals", L"สลับเลขไทย / อารบิก"));
-    p.Caption(TR(L"Select text, then double-tap Alt or use your custom shortcut. Only digits change. Backspace clears the custom shortcut.",
-                 L"เลือกข้อความแล้วกด Alt 2 ครั้ง หรือใช้คีย์ลัดที่ตั้งไว้ เปลี่ยนเฉพาะตัวเลข กด Backspace ในช่องคีย์ลัดเพื่อล้าง"));
+    p.Check(TR(L"Enable numeral conversion", L"เปิดการสลับเลขไทย / อารบิก"), g_set.numeralEnabled != 0, CTL_NUMERAL_ENABLED);
+    p.Caption(TR(L"Select text, then press Ctrl+` (backtick). You can change the shortcut below. Only digits change. Backspace clears the shortcut.",
+                 L"เลือกข้อความแล้วกด Ctrl+` (backtick) เปลี่ยนคีย์ลัดได้ด้านล่าง โดยเปลี่ยนเฉพาะตัวเลข กด Backspace ในช่องคีย์ลัดเพื่อล้าง"));
     HWND modeBox = p.Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, Page::L, p.y, 300, 200, CTL_NUMERAL_MODE);
     for (const wchar_t* name : {TR(L"Menu only", L"ใช้เมนูเท่านั้น"), TR(L"Double Alt", L"กด Alt 2 ครั้ง"), TR(L"Custom shortcut", L"คีย์ลัดที่กำหนดเอง")})
         SendMessageW(modeBox, CB_ADDSTRING, 0, (LPARAM)name);
@@ -2971,6 +3030,8 @@ static void PageCommand(int id, int code, HWND ctl) {
         if (!checked) return;
         SetFixMode(id - CTL_FIX_BASE);
         SettingsReload(TAB_FIX);  // code editors only apply to Automatic
+    } else if (id == CTL_NUMERAL_ENABLED) {
+        SetNumeralEnabled(checked);
     } else if (id == CTL_NUMERAL_MODE && code == CBN_SELCHANGE) {
         DWORD previous = g_set.numeralMode;
         g_set.numeralMode = (DWORD)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
@@ -3279,7 +3340,9 @@ static void ShowMenu() {
     KeyText(g_set.numeralMode == 2 ? g_set.keyNumerals : 0, numeralKey, 32);
     swprintf(numeralTitle, 128, L"%ls\t%ls", TR(L"Convert selected Thai / Arabic numerals", L"สลับเลขไทย / อารบิกที่เลือก"),
              g_set.numeralMode == 1 ? TR(L"Double Alt", L"Alt 2 ครั้ง") : numeralKey);
-    AppendMenuW(m, MF_STRING, ID_CONVERT_NUMERALS, numeralTitle);
+    AppendMenuW(m, MF_STRING | (g_set.numeralEnabled ? MF_CHECKED : 0), ID_NUMERAL_ENABLED,
+                TR(L"Enable Thai / Arabic numeral conversion", L"เปิดการสลับเลขไทย / อารบิก"));
+    AppendMenuW(m, MF_STRING | (g_set.numeralEnabled ? 0 : MF_GRAYED), ID_CONVERT_NUMERALS, numeralTitle);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_SETTINGS, TR(L"Settings\u2026", L"ตั้งค่า\u2026"));
     AppendMenuW(m, MF_STRING, ID_QUIT, TR(L"Quit CursorLingo", L"ปิด CursorLingo"));
@@ -3292,7 +3355,8 @@ static void ShowMenu() {
 
     if (cmd == ID_CONVERT_LANGUAGE || cmd == ID_CONVERT_NUMERALS) {
         if (IsWindow(selectionTarget) && SetForegroundWindow(selectionTarget)) QueueSelection(cmd == ID_CONVERT_NUMERALS);
-    } else if (cmd == ID_QUIT) DestroyWindow(g_host);
+    } else if (cmd == ID_NUMERAL_ENABLED) SetNumeralEnabled(!g_set.numeralEnabled);
+    else if (cmd == ID_QUIT) DestroyWindow(g_host);
     else if (cmd == ID_SETTINGS) ShowSettings(-1);
     else if (cmd == ID_SHORTCUTS) ShowSettings(TAB_PRESENT);
     else if (cmd == ID_PRESENTATION) {
@@ -3323,6 +3387,7 @@ static LRESULT CALLBACK BadgeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     SettingsReload(TAB_BADGE);  // the preview shows the language in use
                 }
                 if (g_lastHkl != before) RememberAppLanguage(g_lastHkl);
+                if (g_visible && UpdateCursorBounds()) Present(true);
             } else if (wp == TIMER_HIDE) {
                 KillTimer(h, TIMER_HIDE);
                 SetVisible(false, true);
@@ -3405,7 +3470,10 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_DISPLAYCHANGE:
         case WM_SETTINGCHANGE:
+            g_cursorHandle = nullptr;  // cursor size/theme may have changed while the mouse was still
             g_monRect = {1, 1, 0, 0};  // force monitor re-query
+            UpdateMonitor(g_pt);
+            if (g_visible) Present(true);
             if (msg == WM_DISPLAYCHANGE && CircleOn()) {
                 PlaceDim();
                 MoveHalo();

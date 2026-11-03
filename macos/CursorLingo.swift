@@ -81,9 +81,13 @@ struct Settings {
         get { d.bool(forKey: "autoFix") }
         set { d.set(newValue, forKey: "autoFix") }
     }
+    static var numeralEnabled: Bool {
+        get { d.object(forKey: "numeralEnabled") as? Bool ?? true }
+        set { d.set(newValue, forKey: "numeralEnabled") }
+    }
     // 0 = menu only, 1 = double Command, 2 = custom shortcut.
     static var numeralMode: Int {
-        get { let n = d.object(forKey: "numeralMode") as? Int ?? 1; return (0...2).contains(n) ? n : 1 }
+        get { let n = d.object(forKey: "numeralMode") as? Int ?? 2; return (0...2).contains(n) ? n : 2 }
         set { d.set(newValue, forKey: "numeralMode") }
     }
     /// With Auto-fix on: fix words by themselves (true), or only when double Shift asks for it (false).
@@ -124,7 +128,7 @@ struct Settings {
     }
     /// The shortcut of a presentation tool: its default until changed, nil once cleared.
     static func shortcut(_ tool: PresentTool) -> Shortcut? {
-        guard let keys = d.array(forKey: "shortcut." + tool.rawValue) as? [Int] else { return tool == .numerals ? nil : tool.defaultShortcut }
+        guard let keys = d.array(forKey: "shortcut." + tool.rawValue) as? [Int] else { return tool.defaultShortcut }
         guard keys.count == 2 else { return nil }
         let s = Shortcut(keyCode: keys[0], modifiers: keys[1])
         return s.isValid ? s : tool.defaultShortcut  // edited by hand into something no key press could make
@@ -548,7 +552,7 @@ final class AutoFix {
         let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
 
-        if Settings.numeralMode == 1 && !shortcutsPaused {
+        if Settings.numeralEnabled && Settings.numeralMode == 1 && !shortcutsPaused {
             if type == .flagsChanged && (code == kVK_Command || code == kVK_RightCommand) {
                 let now = ProcessInfo.processInfo.systemUptime
                 let alone = flags.isDisjoint(with: [.maskShift, .maskControl, .maskAlternate])
@@ -663,6 +667,7 @@ final class AutoFix {
 
     /// Manual commands also work when automatic language fixing is off.
     func requestSelection(numerals: Bool) {
+        guard !numerals || Settings.numeralEnabled else { return }
         guard !selectionBusy, !IsSecureEventInputEnabled() else { return }
         guard CGPreflightPostEventAccess() else { AutoFix.requestPermission(); return }
         selectionBusy = true
@@ -683,6 +688,7 @@ final class AutoFix {
     }
 
     private func convertSelection(numerals: Bool = false) {
+        guard !numerals || Settings.numeralEnabled else { return }
         let front = NSWorkspace.shared.frontmostApplication
         guard !IsSecureEventInputEnabled(), !AutoFix.terminals.contains(front?.bundleIdentifier ?? "") else { return }
         let pid = front?.processIdentifier
@@ -1343,6 +1349,7 @@ enum PresentTool: String, CaseIterable {
         }
     }
     var defaultShortcut: Shortcut {
+        if self == .numerals { return Shortcut(keyCode: kVK_ANSI_Grave, modifiers: controlKey) }
         let key = [PresentTool.spotlight: kVK_ANSI_H, .zoom: kVK_ANSI_Z, .draw: kVK_ANSI_D, .numerals: kVK_ANSI_G][self]!
         return Shortcut(keyCode: key, modifiers: controlKey | optionKey)
     }
@@ -1538,7 +1545,7 @@ final class BadgePreview: NSView {
     }
 }
 
-/// Settings in four tabs: Badge, Fix Wrong Language, Presentation and General. Every change applies at once.
+/// Settings: Badge, Fix Wrong Language, Convert Numerals, Presentation and General. Every change applies at once.
 /// PromptPay, Thailand's bank transfer, for donations: the number, and the QR code that banking apps scan.
 enum PromptPay {
     static let number = "0804782843"
@@ -1572,7 +1579,7 @@ enum PromptPay {
 }
 
 final class SettingsWindow: NSObject, NSWindowDelegate {
-    enum Tab: Int { case badge, fix, presentation, general, numerals }
+    enum Tab: Int { case badge, fix, numerals, presentation, general }
 
     weak var app: AppDelegate?
     private var window: NSWindow?
@@ -1616,7 +1623,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 
     private func makeWindow() {
         tabs.tabStyle = .toolbar
-        let symbols = ["character.cursor.ibeam", "keyboard", "cursorarrow.rays", "gearshape", "number"]
+        let symbols = ["character.cursor.ibeam", "keyboard", "number", "cursorarrow.rays", "gearshape"]
         for symbol in symbols {
             let page = NSViewController()
             page.view = NSView()  // stays for good; build() swaps what is inside, which the tab view shows at once
@@ -1636,9 +1643,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     /// Fills every tab in the menu's current language, keeping the selected one.
     private func build() {
         window?.makeFirstResponder(nil)  // a shortcut box still listening lets go first
-        let titles = [tr("Badge", "ป้ายภาษา"), tr("Fix Wrong Language", "แก้คำผิดภาษา"), tr("Presentation", "นำเสนอ"),
-                      tr("General", "ทั่วไป"), tr("Numerals", "ตัวเลข")]
-        let views = [badgeTab(), fixTab(), presentationTab(), generalTab(), numeralTab()]
+        let titles = [tr("Badge", "ป้ายภาษา"), tr("Fix Wrong Language", "แก้คำผิดภาษา"), tr("Convert Numerals", "สลับตัวเลข"),
+                      tr("Presentation", "นำเสนอ"), tr("General", "ทั่วไป")]
+        let views = [badgeTab(), fixTab(), numeralTab(), presentationTab(), generalTab()]
         for (i, item) in tabs.tabViewItems.enumerated() {
             item.label = titles[i]
             item.viewController?.title = titles[i]  // the tab controller makes the page's title the window's title
@@ -1750,8 +1757,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         shortcutFields[.numerals] = numeralKey
         numeralShortcutStatus.textColor = .systemRed
         let views: [NSView] = [header(tr("Convert Thai / Arabic Numerals", "สลับเลขไทย / อารบิก")),
-            caption(tr("Select text, then double-tap Command or use a custom shortcut. Only digits change. Delete clears the shortcut.",
-                       "เลือกข้อความแล้วกด Command 2 ครั้ง หรือใช้คีย์ลัดที่ตั้งไว้ เปลี่ยนเฉพาะตัวเลข กด Delete ในช่องคีย์ลัดเพื่อล้าง")),
+            check(tr("Enable numeral conversion", "เปิดการสลับเลขไทย / อารบิก"), Settings.numeralEnabled, #selector(AppDelegate.toggleNumeralEnabled), app),
+            caption(tr("Select text, then press Control+` (backtick). You can change the shortcut below. Only digits change. Delete clears the shortcut.",
+                       "เลือกข้อความแล้วกด Control+` (backtick) เปลี่ยนคีย์ลัดได้ด้านล่าง โดยเปลี่ยนเฉพาะตัวเลข กด Delete ในช่องคีย์ลัดเพื่อล้าง")),
             line(numeralMode, numeralKey), numeralShortcutStatus,
             button(tr("Allow Keyboard Access…", "อนุญาตการเข้าถึงแป้นพิมพ์…"), #selector(AppDelegate.allowNumeralAccess), app),
             caption(tr("Mixed digits toggle individually: 12 / ๓๔ becomes ๑๒ / 34. Your input language stays unchanged.",
@@ -2402,6 +2410,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hideWork: DispatchWorkItem?
     private var screenFrames: [NSRect] = []
     private var badgeSize = NSSize.zero
+    private var cursorBounds: [Double] = [0, 0, 32, 32]
+    private var cursorRefresh: Timer?
+    private var cursorMeasuredAt: TimeInterval = 0
     private var visible = false
     let autoFix = AutoFix()
     private var autoFixRetry: Timer?
@@ -2446,6 +2457,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         registerShortcuts()
         settingsWindow.app = self
+        // The cursor can change shape after a hover without another mouse event.
+        cursorRefresh = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            guard let self, self.visible else { return }
+            if self.updateCursorBounds() { self.follow() }
+        }
+        cursorRefresh?.tolerance = 0.05
 
         let mouseEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
         if let m = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents, handler: { [weak self] _ in self?.follow() }) {
@@ -2487,10 +2504,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startAutoFix() {
         autoFixRetry?.invalidate()
         autoFixRetry = nil
-        guard Settings.autoFix || Settings.numeralMode == 1 else { autoFix.stop(); return }
+        guard Settings.autoFix || (Settings.numeralEnabled && Settings.numeralMode == 1) else { autoFix.stop(); return }
         guard !autoFix.start() else { return }
         autoFixRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
-            guard let self, Settings.autoFix || Settings.numeralMode == 1 else { t.invalidate(); return }
+            guard let self, Settings.autoFix || (Settings.numeralEnabled && Settings.numeralMode == 1) else { t.invalidate(); return }
             if self.autoFix.start() { t.invalidate(); self.autoFixRetry = nil }
         }
     }
@@ -2520,11 +2537,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func systemResumed() {
         autoFix.recover()
-        if (Settings.autoFix || Settings.numeralMode == 1) && !autoFix.isRunning { startAutoFix() }  // retries until the tap can be created again
+        if (Settings.autoFix || (Settings.numeralEnabled && Settings.numeralMode == 1)) && !autoFix.isRunning { startAutoFix() }  // retries until the tap can be created again
         refresh(animated: false)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        cursorRefresh?.invalidate()
         monitors.forEach(NSEvent.removeMonitor)
     }
 
@@ -2550,7 +2568,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         presenter.screensChanged()
     }
 
-    /// Repositions the badge under the pointer. Called for every mouse event, so it stays allocation-free.
+    /// Use the displayed cursor, not the app's default arrow; hotspot is measured from its top-left.
+    @discardableResult
+    private func updateCursorBounds() -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - cursorMeasuredAt >= 0.05 else { return false }
+        cursorMeasuredAt = now
+        let cursor = NSCursor.currentSystem ?? NSCursor.arrow
+        let size = cursor.image.size, hot = cursor.hotSpot
+        let next = [-Double(hot.x), -Double(hot.y), Double(size.width - hot.x), Double(size.height - hot.y)]
+        guard next != cursorBounds else { return false }
+        cursorBounds = next
+        return true
+    }
+
+    /// Repositions the badge beside the current cursor shape, with screen-edge fallback.
     private func follow() {
         let p = NSEvent.mouseLocation
         presenter.follow(p)
@@ -2558,12 +2590,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var frame = screenFrames.first(where: { $0.contains(p) }) ?? screenFrames.first ?? .zero
         if frame == .zero { frame = NSRect(x: -1e5, y: -1e5, width: 2e5, height: 2e5) }
 
-        let s = badge.scale
-        var x = p.x + 12 * s
-        var y = p.y - 22 * s - badgeSize.height / 2
-        if x + badgeSize.width > frame.maxX { x = p.x - 8 * s - badgeSize.width }   // flip left
-        if y < frame.minY { y = p.y + 8 * s }                                         // flip up
-        panel.setFrameOrigin(NSPoint(x: x.rounded(), y: y.rounded()))
+        updateCursorBounds()
+        let screen = [Double(frame.minX - p.x), Double(p.y - frame.maxY),
+                      Double(frame.maxX - p.x), Double(p.y - frame.minY)]
+        var origin = [Double](repeating: 0, count: 2)
+        lf_place_badge(screen, cursorBounds, Double(badgeSize.width), Double(badgeSize.height),
+                       4, Double(20 * badge.scale), &origin)
+        panel.setFrameOrigin(NSPoint(x: (p.x + CGFloat(origin[0])).rounded(),
+                                     y: (p.y - CGFloat(origin[1]) - badgeSize.height).rounded()))
     }
 
     @objc private func inputSourceChanged() {
@@ -2660,7 +2694,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item(tr("Convert Selected Language (EN / TH)", "สลับภาษาข้อความที่เลือก (EN / TH)"), #selector(convertSelectedLanguage)))
         let numeralHint = Settings.numeralMode == 1 ? tr(" — Double Command", " — Command 2 ครั้ง") :
             Settings.numeralMode == 2 ? Settings.shortcut(.numerals).map { " — " + $0.display } ?? "" : ""
-        menu.addItem(item(tr("Convert Selected Thai / Arabic Numerals", "สลับเลขไทย / อารบิกที่เลือก") + numeralHint, #selector(convertNumerals)))
+        menu.addItem(item(tr("Enable Thai / Arabic Numeral Conversion", "เปิดการสลับเลขไทย / อารบิก"), #selector(toggleNumeralEnabled), on: Settings.numeralEnabled))
+        if Settings.numeralEnabled {
+            menu.addItem(item(tr("Convert Selected Thai / Arabic Numerals", "สลับเลขไทย / อารบิกที่เลือก") + numeralHint, #selector(convertNumerals)))
+        }
         // One menu for the whole feature: Off, Double Shift Only (fix on request) or Automatic. The rest is in Settings.
         menu.addItem(submenu(tr("Fix Wrong Language (EN ⇄ TH): ", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): ") + Settings.fixMode.title,
                              FixMode.allCases.map { ($0.rawValue, $0.title) }, selected: Settings.fixMode.rawValue,
@@ -2779,7 +2816,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         presentationKeys = []  // a key can't be registered twice: let the old ones go first
         var failed: [PresentTool] = []
         for tool in PresentTool.allCases {
-            if tool == .numerals && Settings.numeralMode != 2 { continue }
+            if tool == .numerals && (!Settings.numeralEnabled || Settings.numeralMode != 2) { continue }
             guard let s = Settings.shortcut(tool) else { continue }
             let key = HotKey(keyCode: s.keyCode, modifiers: s.modifiers) { [weak self] in self?.toggle(tool) }
             if key.registered { presentationKeys.append(key) } else { failed.append(tool) }
@@ -2799,6 +2836,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoFix.shortcutsPaused = paused
         autoFix.reset()
         if paused { presentationKeys = [] } else { registerShortcuts() }
+    }
+    @objc func toggleNumeralEnabled() {
+        Settings.numeralEnabled.toggle()
+        updateNumeralShortcuts()
+        settingsWindow.reload()
     }
     func updateNumeralShortcuts() {
         autoFix.reset()

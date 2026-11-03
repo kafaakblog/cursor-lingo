@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: c++ -std=c++17 -Wall -I core tests/layoutfix_test.cpp -o lf_test && ./lf_test
       - run: c++ -std=c++17 -Wall -Wextra -I core tests/numerals_test.cpp core/layoutfix_c.cpp -o numerals_test && ./numerals_test
+      - run: c++ -std=c++17 -Wall -Wextra -I core tests/badge_position_test.cpp core/layoutfix_c.cpp -o badge_position_test && ./badge_position_test
 
   macos:
     runs-on: macos-latest

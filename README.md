@@ -269,15 +269,14 @@ Both are also in the app, under **Settings → General**.
 
 [MIT](LICENSE)
 
-## Thai Digit Support / สลับเลขไทย ↔ อารบิก
-Supports toggling between Thai digits (๐-๙) and Arabic digits (0-9).
-
 ## Convert selected Thai / Arabic numerals
 
-Select text in an editable field and double-tap **Alt** on Windows or **Command (⌘)** on macOS. The tray/menu-bar menu also offers separate commands for converting the selected language and converting selected numerals.
+Select text in an editable field and press **Ctrl + backtick (`)** on Windows or **Control + backtick (`)** on macOS. This uses Control on Mac, not Command. The tray/menu-bar menu has a checked **Enable Thai / Arabic numeral conversion** switch; turning it off disables numeral shortcuts and the numeral conversion command without changing language fixing.
 
-Under **Settings → Numerals**, choose double-tap, a custom shortcut, or menu only. This works independently of automatic language fixing. The default numeral gesture is double Alt / Command; each tap must be shorter than 350 ms and the releases less than 450 ms apart. Chords such as Alt+Tab and Command+C cancel the gesture. macOS requires Input Monitoring for double Command and Accessibility to replace text; use **Allow Keyboard Access…** in Settings.
+**Settings → Convert Numerals**, immediately after **Fix Wrong Language**, lets you enable/disable the feature, choose a custom shortcut, use the menu only, or optionally choose double Alt (Windows) / double Command (macOS). Editing a shortcut selects custom-shortcut mode. The feature works independently of automatic language fixing. macOS requires Accessibility to replace text; optional double Command also needs Input Monitoring. Use **Allow Keyboard Access…** in Settings.
 
-Digits are converted by value, never by keyboard position: `001,234.50` ⇄ `๐๐๑,๒๓๔.๕๐`. Mixed selections toggle each digit (`12 / ๓๔` → `๑๒ / 34`). Letters, punctuation, whitespace, and the current input language stay unchanged. Select the result again to reverse it, or use the editor's Undo.
+Digits are converted by value: `001,234.50` ⇄ `๐๐๑,๒๓๔.๕๐`. Mixed selections toggle each digit (`12 / ๓๔` → `๑๒ / 34`). Letters, punctuation, whitespace, and the input language stay unchanged. Select the result again to reverse it, or use the editor's Undo. Separate menu commands convert the selected language or the selected numerals.
 
-Selections are limited to 2,000 UTF-16 units. Password fields and terminals are skipped. When clipboard fallback is used, selections ending with a newline are skipped because some editors copy the entire current line when nothing is selected. Clipboard text replacement may use the destination's formatting.
+Selections are limited to 2,000 UTF-16 units. Password fields and terminals are skipped. Clipboard fallback skips selections ending with a newline because some editors copy the whole line when nothing is selected. Clipboard replacement may use the destination's formatting.
+
+The language badge now uses the displayed cursor's dimensions and hotspot to leave room for enlarged arrows, hands, and other pointer shapes. It flips to another side near a screen edge and stays within the screen/work area.
