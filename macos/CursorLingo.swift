@@ -4,8 +4,8 @@
 //   * Event-driven: no polling timers. The badge moves on mouse events and redraws
 //     only when the input source changes.
 //   * Tiny footprint: one borderless click-through panel, one status item, no network.
-//   * Keyboard monitoring exists only for the optional "Fix Wrong Language" feature. It is
-//     off by default, needs explicit macOS permission, and keeps nothing but the word being typed.
+//   * Keyboard monitoring serves opt-in language fixing and the double-Command numeral shortcut.
+//     It needs explicit macOS permission; with language fixing off, no typed words are retained.
 //   * Optional launch at login (SMAppService, with a LaunchAgent fallback).
 
 import AppKit
@@ -81,6 +81,11 @@ struct Settings {
         get { d.bool(forKey: "autoFix") }
         set { d.set(newValue, forKey: "autoFix") }
     }
+    // 0 = menu only, 1 = double Command, 2 = custom shortcut.
+    static var numeralMode: Int {
+        get { let n = d.object(forKey: "numeralMode") as? Int ?? 1; return (0...2).contains(n) ? n : 1 }
+        set { d.set(newValue, forKey: "numeralMode") }
+    }
     /// With Auto-fix on: fix words by themselves (true), or only when double Shift asks for it (false).
     static var fixAsYouType: Bool {
         get { d.object(forKey: "fixAsYouType") as? Bool ?? true }
@@ -119,7 +124,7 @@ struct Settings {
     }
     /// The shortcut of a presentation tool: its default until changed, nil once cleared.
     static func shortcut(_ tool: PresentTool) -> Shortcut? {
-        guard let keys = d.array(forKey: "shortcut." + tool.rawValue) as? [Int] else { return tool.defaultShortcut }
+        guard let keys = d.array(forKey: "shortcut." + tool.rawValue) as? [Int] else { return tool == .numerals ? nil : tool.defaultShortcut }
         guard keys.count == 2 else { return nil }
         let s = Shortcut(keyCode: keys[0], modifiers: keys[1])
         return s.isValid ? s : tool.defaultShortcut  // edited by hand into something no key press could make
@@ -421,6 +426,12 @@ final class AutoFix {
     private(set) var rules: [Rule] = []  // the personal word list; see learn(_:)
     private var language: Int?           // layout currently on screen: 0 = EN, 1 = TH, nil = unsupported
     private var expectedLanguage: Int?   // a layout switch we made ourselves: it must not end the word
+    var shortcutsPaused = false
+    private var commandDownAt: TimeInterval = 0
+    private var commandClean = false
+    private var commandKey: Int?
+    private var lastCommandTap: TimeInterval?
+    private var selectionBusy = false
     private var shiftDownAt: TimeInterval = 0
     private var shiftClean = false       // no other key since Shift went down
     private var lastShiftTap: TimeInterval = 0
@@ -499,6 +510,9 @@ final class AutoFix {
     func reset() {
         word = Word()
         last = nil
+        commandClean = false
+        commandKey = nil
+        lastCommandTap = nil
         lastShiftTap = 0
         frontApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
     }
@@ -530,9 +544,33 @@ final class AutoFix {
             return
         }
         if event.getIntegerValueField(.eventSourceUserData) == AutoFix.marker { return }
-        guard let language, !IsSecureEventInputEnabled() else { reset(); return }
+        guard !IsSecureEventInputEnabled() else { reset(); return }
         let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
+
+        if Settings.numeralMode == 1 && !shortcutsPaused {
+            if type == .flagsChanged && (code == kVK_Command || code == kVK_RightCommand) {
+                let now = ProcessInfo.processInfo.systemUptime
+                let alone = flags.isDisjoint(with: [.maskShift, .maskControl, .maskAlternate])
+                if flags.contains(.maskCommand) {
+                    if commandKey == nil { commandKey = code; commandDownAt = now; commandClean = alone }
+                    else if commandKey != code { commandClean = false; lastCommandTap = nil }
+                } else {
+                    if commandClean && alone && commandKey == code && now - commandDownAt < 0.35 {
+                        if let previous = lastCommandTap, now - previous < 0.45 {
+                            lastCommandTap = nil
+                            requestSelection(numerals: true)
+                        } else { lastCommandTap = now }
+                    } else { lastCommandTap = nil }
+                    commandKey = nil
+                    commandClean = false
+                }
+            } else {
+                commandClean = false
+                lastCommandTap = nil
+            }
+        }
+        guard Settings.autoFix, let language else { return }
 
         if type == .flagsChanged {
             guard code == 56 || code == 60 else { shiftClean = false; return }  // left / right Shift only
@@ -623,10 +661,33 @@ final class AutoFix {
         return .text(text)
     }
 
-    private func convertSelection() {
-        guard !AutoFix.terminals.contains(frontApp) else { return }
+    /// Manual commands also work when automatic language fixing is off.
+    func requestSelection(numerals: Bool) {
+        guard !selectionBusy, !IsSecureEventInputEnabled() else { return }
+        guard CGPreflightPostEventAccess() else { AutoFix.requestPermission(); return }
+        selectionBusy = true
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        func waitForRelease(_ attempts: Int) {
+            guard attempts < 50, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                  !IsSecureEventInputEnabled() else { self.selectionBusy = false; return }
+            let flags = CGEventSource.flagsState(.combinedSessionState)
+            if !flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate, .maskShift]) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { waitForRelease(attempts + 1) }
+                return
+            }
+            self.convertSelection(numerals: numerals)
+            // Clipboard fallback/paste finishes before accepting another request.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.selectionBusy = false }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { waitForRelease(0) }
+    }
+
+    private func convertSelection(numerals: Bool = false) {
+        let front = NSWorkspace.shared.frontmostApplication
+        guard !IsSecureEventInputEnabled(), !AutoFix.terminals.contains(front?.bundleIdentifier ?? "") else { return }
+        let pid = front?.processIdentifier
         switch AutoFix.accessibilitySelection() {
-        case .text(let text): replaceSelection(text)
+        case .text(let text): replaceSelection(text, numerals: numerals)
         case .none: return
         case .unknown:  // the app doesn't expose its selection: copy it, then put the clipboard back
             withClipboardSaved { restore in
@@ -637,21 +698,30 @@ final class AutoFix {
                     let text = pb.changeCount != before ? pb.string(forType: .string) : nil
                     restore()
                     // Editors copy the whole line ("...\n") when nothing is selected: never act on that.
-                    if let text, !text.hasSuffix("\n") { self.replaceSelection(text) }
+                    if let text, !text.hasSuffix("\n"),
+                       NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, !IsSecureEventInputEnabled() {
+                        self.replaceSelection(text, numerals: numerals)
+                    }
                 }
             }
         }
     }
 
     /// Types (or, for several lines, pastes) the other layout's reading of `text` over the selection.
-    private func replaceSelection(_ text: String) {
+    private func replaceSelection(_ text: String, numerals: Bool = false) {
         let units = Array(text.utf16)
         guard !units.isEmpty, units.count <= 2000 else { return }
         var out = [UInt16](repeating: 0, count: units.count)
-        let target = Int(lf_convert_text(units, Int32(units.count), &out))
-        guard target >= 0 else { return }
-        if language != target { expectedLanguage = target }
-        InputSource.select(target)
+        let target: Int
+        if numerals {
+            guard lf_convert_numerals(units, Int32(units.count), &out) else { return }
+            target = 0  // unused for numerals: never change the input source or teach the word list
+        } else {
+            target = Int(lf_convert_text(units, Int32(units.count), &out))
+            guard target >= 0 else { return }
+            if language != target { expectedLanguage = target }
+            InputSource.select(target)
+        }
 
         if out.contains(0x0A) || out.contains(0x0D) {
             // Typing a new line could press Return (and send a chat message): paste instead.
@@ -665,6 +735,7 @@ final class AutoFix {
         } else {
             for unit in out { post(keyCode: 0, unicode: unit) }  // the first character replaces the selection
         }
+        if numerals { reset(); return }
         // The converted text is now "the last word" if it is one, so double Shift flips it straight back.
         let keys = out.map { lf_key_for_char($0, Int32(target)) }
         if !keys.contains(-1) {
@@ -1258,16 +1329,17 @@ final class HotKey {
 
 /// The presentation tools that have a shortcut of their own.
 enum PresentTool: String, CaseIterable {
-    case spotlight, zoom, draw
+    case spotlight, zoom, draw, numerals
     var title: String {
         switch self {
         case .spotlight: return tr("Spotlight", "สปอตไลต์")
         case .zoom: return tr("Zoom", "ซูม")
         case .draw: return tr("Draw on Screen", "วาดบนจอ")
+        case .numerals: return tr("Thai / Arabic Numerals", "เลขไทย / อารบิก")
         }
     }
     var defaultShortcut: Shortcut {
-        let key = [PresentTool.spotlight: kVK_ANSI_H, .zoom: kVK_ANSI_Z, .draw: kVK_ANSI_D][self]!
+        let key = [PresentTool.spotlight: kVK_ANSI_H, .zoom: kVK_ANSI_Z, .draw: kVK_ANSI_D, .numerals: kVK_ANSI_G][self]!
         return Shortcut(keyCode: key, modifiers: controlKey | optionKey)
     }
 }
@@ -1352,6 +1424,7 @@ struct Shortcut: Equatable {
 
 /// A box that records a shortcut: click it, then press the keys. Delete clears it, Esc gives up.
 final class ShortcutField: NSView {
+    var isEnabled = true { didSet { needsDisplay = true } }
     var shortcut: Shortcut? { didSet { needsDisplay = true } }
     /// The user picked a new shortcut, or cleared it (nil).
     var onRecord: ((Shortcut?) -> Void)?
@@ -1364,10 +1437,11 @@ final class ShortcutField: NSView {
         }
     }
 
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { isEnabled }
     override var intrinsicContentSize: NSSize { NSSize(width: 150, height: 24) }
 
     override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
         window?.makeFirstResponder(self)
         listening = true
     }
@@ -1406,7 +1480,7 @@ final class ShortcutField: NSView {
         let text = listening ? tr("Type shortcut…", "กดคีย์ที่ต้องการ…") : shortcut?.display ?? tr("None", "ไม่มี")
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13),
-            .foregroundColor: listening || shortcut == nil ? NSColor.secondaryLabelColor : NSColor.labelColor,
+            .foregroundColor: !isEnabled || listening || shortcut == nil ? NSColor.secondaryLabelColor : NSColor.labelColor,
         ]
         let size = text.size(withAttributes: attrs)
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attrs)
@@ -1508,6 +1582,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private var resets: [NSButton] = []
     private var shortcutFields: [PresentTool: ShortcutField] = [:]
     private let shortcutStatus = NSTextField(labelWithString: "")
+    private let numeralShortcutStatus = NSTextField(labelWithString: "")
     private let radiusValue = NSTextField(labelWithString: "")
     private let zoomValue = NSTextField(labelWithString: "")
     private var reloadPending = false
@@ -1662,13 +1737,31 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         guard let app else { return NSView() }
         let mode = Settings.fixMode
         let modes: [(FixMode, String)] = [
-            (.off, tr("Nothing is fixed, and CursorLingo doesn't look at your typing at all.", "ไม่แก้อะไรให้ และไม่ดูสิ่งที่คุณพิมพ์เลย")),
+            (.off, tr("Language fixing is off. Numeral shortcuts are configured separately.", "ปิดการแก้คำผิดภาษา ส่วนคีย์ลัดตัวเลขตั้งค่าแยกได้")),
             (.manual, tr("Tap Shift twice to switch the last word (or the selected text) to the other language.",
                          "พิมพ์ผิดภาษาเมื่อไหร่ กด Shift 2 ครั้งติดกัน คำล่าสุด (หรือข้อความที่เลือกไว้) จะเปลี่ยนเป็นอีกภาษาให้")),
             (.automatic, tr("Words typed in the wrong language are fixed as you type. If a fix is wrong, double Shift puts it back.",
                             "แก้คำที่พิมพ์ผิดภาษาให้เองระหว่างพิมพ์ ถ้าแก้ไม่ตรงใจ กด Shift 2 ครั้งเพื่อย้อนคืน")),
         ]
-        var views: [NSView] = [header(tr("Fix Wrong Language (EN ⇄ TH)", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH)"))]
+        let numeralMode = popup([("0", tr("Menu only", "ใช้เมนูเท่านั้น")),
+                                 ("1", tr("Double Command", "กด Command 2 ครั้ง")),
+                                 ("2", tr("Custom shortcut", "คีย์ลัดที่กำหนดเอง"))], String(Settings.numeralMode), #selector(numeralModeChanged(_:)))
+        numeralMode.target = self
+        numeralMode.action = #selector(numeralModeChanged(_:))
+        let numeralKey = ShortcutField()
+        numeralKey.shortcut = Settings.shortcut(.numerals)
+        numeralKey.onRecord = { [weak self] s in self?.setShortcut(.numerals, s) }
+        numeralKey.onListening = { [weak app] listening in app?.pauseShortcuts(listening) }
+        numeralKey.isEnabled = Settings.numeralMode == 2
+        numeralKey.widthAnchor.constraint(equalToConstant: 104).isActive = true
+        shortcutFields[.numerals] = numeralKey
+        numeralShortcutStatus.textColor = .systemRed
+        var views: [NSView] = [header(tr("Convert Thai / Arabic Numerals", "สลับเลขไทย / อารบิก")),
+            caption(tr("Select text, then double-tap Command or use a custom shortcut. Only digits change. Delete clears the shortcut.",
+                       "เลือกข้อความแล้วกด Command 2 ครั้ง หรือใช้คีย์ลัดที่ตั้งไว้ เปลี่ยนเฉพาะตัวเลข กด Delete ในช่องคีย์ลัดเพื่อล้าง")),
+            line(numeralMode, numeralKey), numeralShortcutStatus,
+            button(tr("Allow Keyboard Access…", "อนุญาตการเข้าถึงแป้นพิมพ์…"), #selector(AppDelegate.allowNumeralAccess), app),
+            separator(), header(tr("Fix Wrong Language (EN ⇄ TH)", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH)"))]
         for (i, (m, detail)) in modes.enumerated() {
             let radio = NSButton(radioButtonWithTitle: m.title, target: self, action: #selector(fixModeChanged(_:)))
             radio.tag = i
@@ -1735,7 +1828,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
              tr("Draw over the screen with the mouse. While it's on, clicks draw instead of reaching apps; Esc stops.",
                 "ลากเมาส์ขีดเขียนบนจอได้เลย ระหว่างนี้คลิกจะเป็นการวาด ไม่โดนแอปข้างใต้ กด Esc เพื่อเลิกวาด")),
         ]
-        shortcutFields = [:]
+        shortcutFields = shortcutFields.filter { $0.key == .numerals }
         let heading = NSStackView(views: [header(tr("Tools", "เครื่องมือ")),
                                           caption(tr("To change a shortcut, click it and press the new keys (⌃, ⌥ or ⌘ with a letter, "
                                                      + "number or F-key). Delete clears it.",
@@ -1977,6 +2070,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         reload()
     }
 
+    @objc private func numeralModeChanged(_ sender: NSPopUpButton) {
+        Settings.numeralMode = Int(sender.selectedItem?.representedObject as? String ?? "0") ?? 0
+        app?.updateNumeralShortcuts()
+        reload()
+    }
+
     private func setShortcut(_ tool: PresentTool, _ s: Shortcut?) {
         if let s {
             if Shortcut.reserved.contains(s) {
@@ -1999,6 +2098,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     }
 
     private func showShortcutStatus(_ message: String) {
+        numeralShortcutStatus.stringValue = message
+        numeralShortcutStatus.isHidden = message.isEmpty
         shortcutStatus.stringValue = message
         shortcutStatus.isHidden = message.isEmpty
     }
@@ -2366,9 +2467,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startAutoFix() {
         autoFixRetry?.invalidate()
         autoFixRetry = nil
-        guard Settings.autoFix, !autoFix.start() else { return }
+        guard Settings.autoFix || Settings.numeralMode == 1 else { autoFix.stop(); return }
+        guard !autoFix.start() else { return }
         autoFixRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
-            guard let self, Settings.autoFix else { t.invalidate(); return }
+            guard let self, Settings.autoFix || Settings.numeralMode == 1 else { t.invalidate(); return }
             if self.autoFix.start() { t.invalidate(); self.autoFixRetry = nil }
         }
     }
@@ -2398,7 +2500,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func systemResumed() {
         autoFix.recover()
-        if Settings.autoFix && !autoFix.isRunning { startAutoFix() }  // retries until the tap can be created again
+        if (Settings.autoFix || Settings.numeralMode == 1) && !autoFix.isRunning { startAutoFix() }  // retries until the tap can be created again
         refresh(animated: false)
     }
 
@@ -2535,6 +2637,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(presentationMenu())
+        menu.addItem(item(tr("Convert Selected Language (EN / TH)", "สลับภาษาข้อความที่เลือก (EN / TH)"), #selector(convertSelectedLanguage)))
+        let numeralHint = Settings.numeralMode == 1 ? tr(" — Double Command", " — Command 2 ครั้ง") :
+            Settings.numeralMode == 2 ? Settings.shortcut(.numerals).map { " — " + $0.display } ?? "" : ""
+        menu.addItem(item(tr("Convert Selected Thai / Arabic Numerals", "สลับเลขไทย / อารบิกที่เลือก") + numeralHint, #selector(convertNumerals)))
         // One menu for the whole feature: Off, Double Shift Only (fix on request) or Automatic. The rest is in Settings.
         menu.addItem(submenu(tr("Fix Wrong Language (EN ⇄ TH): ", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): ") + Settings.fixMode.title,
                              FixMode.allCases.map { ($0.rawValue, $0.title) }, selected: Settings.fixMode.rawValue,
@@ -2596,7 +2702,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard mode != .off else {
             Settings.autoFix = false
             autoFixRetry?.invalidate()
-            autoFix.stop()
+            autoFix.reset()
+            startAutoFix()
             return
         }
         Settings.fixAsYouType = mode == .automatic
@@ -2652,6 +2759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         presentationKeys = []  // a key can't be registered twice: let the old ones go first
         var failed: [PresentTool] = []
         for tool in PresentTool.allCases {
+            if tool == .numerals && Settings.numeralMode != 2 { continue }
             guard let s = Settings.shortcut(tool) else { continue }
             let key = HotKey(keyCode: s.keyCode, modifiers: s.modifiers) { [weak self] in self?.toggle(tool) }
             if key.registered { presentationKeys.append(key) } else { failed.append(tool) }
@@ -2663,12 +2771,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .spotlight: toggleSpotlight()
         case .zoom: toggleZoom()
         case .draw: toggleDrawing()
+        case .numerals: convertNumerals()
         }
     }
     /// While a shortcut box in Settings listens, the keys must reach it instead of toggling a tool.
     func pauseShortcuts(_ paused: Bool) {
+        autoFix.shortcutsPaused = paused
+        autoFix.reset()
         if paused { presentationKeys = [] } else { registerShortcuts() }
     }
+    func updateNumeralShortcuts() {
+        autoFix.reset()
+        startAutoFix()
+        registerShortcuts()
+    }
+    @objc func allowNumeralAccess() { AutoFix.requestPermission(); startAutoFix() }
+    @objc func convertNumerals() { autoFix.requestSelection(numerals: true) }
+    @objc func convertSelectedLanguage() { autoFix.requestSelection(numerals: false) }
     @objc private func showShortcuts() { settingsWindow.show(.presentation) }
     @objc private func showSettings() { settingsWindow.show() }
     @objc func toggleSpotlight() { presenter.setSpotlight(!presenter.spotlight) }
